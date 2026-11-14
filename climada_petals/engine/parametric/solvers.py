@@ -99,7 +99,8 @@ ranged over the near-optimal set
 re-solved first at HiGHS's tolerances of ``1e-10``
 (:data:`RANGE_HIGHS_OPTIONS`). Each amount is ranged twice, at a wide and a
 narrow tolerance (:data:`RANGE_TOLERANCES`, ``1e-9`` and ``1e-11``): its
-smallest and its largest value, so four LPs per amount. Near the optimum
+smallest and its largest value, so four LPs per amount, each as large as
+the design problem's own LP. Near the optimum
 the width of a range is ``w0 + eps / s``, with ``w0`` the width of the
 optimal set along the amount and ``s`` the objective's slope there. At a
 unique vertex ``w0 = 0``, so the width falls with ``eps``; on a set of

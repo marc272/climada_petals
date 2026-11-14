@@ -214,8 +214,10 @@ class CalibrationOptions:
     ranges : bool, default False
         Whether the LP route ranges each identified amount over the
         near-optimal set, which decides ``unique`` there (module docstring):
-        four more linear programs per amount. The mean squared error's
-        route and the numpy grid have no ranges.
+        one more linear program for the optimum and four per amount, each
+        as large as the design problem's own, so on a large joint design
+        the ranges take minutes. The mean squared error's route and the
+        numpy grid have no ranges.
     lp_method : {"auto", "highs", "highs-ipm"}, default "auto"
         The ``linprog`` method of the linear programs: ``"auto"`` takes
         ``"highs"`` for a problem with one unit and ``"highs-ipm"`` for
