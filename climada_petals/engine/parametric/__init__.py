@@ -71,11 +71,21 @@ from CLIMADA's ``Hazard``, ``TCTracks``, ``Exposures`` and ``Impact``:
   each other's shortfalls), and returns a :class:`CalibrationResult`.
   Pricing: :class:`PurePremium` or :class:`CostOfCapitalLoad`, under a
   premium budget.
-* **Metrics:** :func:`basis_risk`, and the payouts as a CLIMADA ``Impact``
-  (:meth:`CalibrationResult.payout_impact`).
+* **Evaluation:** :func:`evaluate` and :func:`compare` give the metrics of
+  any cover, designed or given, on a sample, in or out of sample, as a
+  pandas table: coverage, tail coverage, basis risk, VaR and CVaR of the
+  uncovered loss and of the net loss, return periods and more, per unit
+  and for the owner's total. Every row carries its setup (basis and route,
+  split, index, pricing, scope), which :func:`setup_text` renders. The
+  thresholds are always stated, in :class:`MetricOptions`.
+  :func:`payout_impact` and :func:`uncovered_impact` give the payouts and
+  the uncovered losses as CLIMADA ``Impact`` objects, so that
+  ``calc_freq_curve``, ``local_exceedance_impact`` and ``write_hdf5`` work
+  on them. Plots: :func:`plot_payout`, :func:`plot_payout_vs_loss` and
+  :func:`plot_exceedance`.
 
-The module depends only on CLIMADA, numpy, scipy and pandas, plus cvxpy for
-the mean squared error.
+The module depends only on CLIMADA, numpy, scipy, pandas and matplotlib,
+plus cvxpy for the mean squared error.
 """
 
 from .annual import CatalogueYears, YearSets, sample_years
@@ -95,10 +105,11 @@ from .errors import (
     UnresolvedParameterError,
     YearRouteError,
 )
+from .evaluate import compare, evaluate, payout_impact, uncovered_impact
 from .index import ParametricIndex
 from .index_tracks import SAFFIR_SIMPSON_KN
 from .measure import ENSEMBLE_PARENT, EventBasis, OutcomeMeasure, labels_from_names
-from .metrics import basis_risk
+from .metrics import MetricOptions, setup_text
 from .objectives import ExpectedUncovered, MeanSquaredError, WeightedCVaR
 from .parameters import AmountConstraints, Free
 from .payout import (
@@ -110,6 +121,7 @@ from .payout import (
     StepPayout,
     register_payout,
 )
+from .plots import plot_exceedance, plot_payout, plot_payout_vs_loss
 from .pricing import CostOfCapitalLoad, PurePremium
 from .riskmeasures import var_cvar
 from .sample import (
@@ -144,6 +156,7 @@ __all__ = [
     "LinearInAmounts",
     "LinearPayout",
     "MeanSquaredError",
+    "MetricOptions",
     "MissingDependencyError",
     "OutcomeMeasure",
     "OutcomeSample",
@@ -162,13 +175,20 @@ __all__ = [
     "WeightedCVaR",
     "YearRouteError",
     "YearSets",
-    "basis_risk",
     "calibrate",
     "check_no_leakage",
+    "compare",
+    "evaluate",
     "holdout",
     "labels_from_names",
+    "payout_impact",
+    "plot_exceedance",
+    "plot_payout",
+    "plot_payout_vs_loss",
     "register_payout",
     "sample_years",
+    "setup_text",
+    "uncovered_impact",
     "var_cvar",
     "year_block_kfold",
 ]

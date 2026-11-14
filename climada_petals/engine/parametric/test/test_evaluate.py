@@ -1,0 +1,725 @@
+"""
+This file is part of CLIMADA.
+
+Copyright (C) 2017 ETH Zurich, CLIMADA contributors listed in AUTHORS.
+
+CLIMADA is free software: you can redistribute it and/or modify it under the
+terms of the GNU General Public License as published by the Free
+Software Foundation, version 3.
+
+CLIMADA is distributed in the hope that it will be useful, but WITHOUT ANY
+WARRANTY; without even the implied warranty of MERCHANTABILITY or FITNESS FOR A
+PARTICULAR PURPOSE.  See the GNU General Public License for more details.
+
+You should have received a copy of the GNU General Public License along
+with CLIMADA. If not, see <https://www.gnu.org/licenses/>.
+
+---
+
+Tests of the evaluation: tables, premiums, rows, and payouts as an ``Impact``.
+
+The golden cases in ``data/cases`` and their samples in ``data/samples`` are
+copied unchanged from the parity fixtures of the parametric-insurance-design
+repository (``parity/climada/``): small synthetic samples, and the values a
+thesis-faithful reference implementation, or a closed form, gives on them.
+They are dedicated to the public domain (CC0-1.0); every sample records it.
+"""
+
+from __future__ import annotations
+
+import json
+import math
+import tempfile
+import unittest
+from pathlib import Path
+from typing import Any
+
+import numpy as np
+import pandas as pd
+from climada.engine import Impact
+from climada.entity import Exposures
+from climada.util.yearsets import impact_yearset_from_sampling_vect
+
+from climada_petals.engine.parametric import (
+    CalibrationResult,
+    CatalogueYears,
+    CostOfCapitalLoad,
+    EventAlignmentError,
+    EventBasis,
+    ExpectedUncovered,
+    IndexDefinition,
+    InsuredUnits,
+    MetricOptions,
+    OutcomeSample,
+    ParametricCover,
+    ParametricIndex,
+    ParametricInputError,
+    PurePremium,
+    StepPayout,
+    UnresolvedParameterError,
+    WeightedCVaR,
+    YearSets,
+    calibrate,
+    compare,
+    evaluate,
+    holdout,
+    payout_impact,
+    uncovered_impact,
+    var_cvar,
+    year_block_kfold,
+)
+from climada_petals.engine.parametric.test._synthetic import (
+    TABLE_WIND,
+    array_sample,
+    random_portfolio,
+)
+
+DATA = Path(__file__).parent / "data"
+
+#: The levels and return periods the golden cases list.
+GOLDEN = MetricOptions(betas=(0.9, 0.99), return_periods=(2, 10, 50))
+
+#: Metrics without a unit: their absolute floor is 1e-9, not 1e-9 x the scale.
+UNITLESS = (
+    "coverage_ratio",
+    "payout_to_loss_ratio",
+    "payout_frequency",
+    "correlation",
+    "tail_coverage_",
+    "cvar_uncovered_to_loss_",
+    "false_negative_rate_",
+    "false_positive_rate_",
+)
+
+PAYOUT = StepPayout.uniform(20.0, 70.0, 4)
+
+
+def _golden_sample(case: dict[str, Any]) -> tuple[OutcomeSample, float]:
+    """Return a case's sample, every event kept, and the case's scale."""
+    raw = json.loads((DATA / case["sample"]).read_text(encoding="utf-8"))
+    n_units = len(raw["unit_id"])
+    exp = Exposures(
+        lat=np.full(n_units, 10.0),
+        lon=np.linspace(0.0, 1.0, n_units),
+        value=np.ones(n_units),
+    )
+    exp.gdf.index = raw["unit_id"]
+    units = InsuredUnits.points(exp)
+    definition = IndexDefinition.from_dict(case["cover"]["index"])
+    index = ParametricIndex(raw["index"], raw["event_id"], units.unit_id, definition)
+    if case["basis"]["kind"] == "event":
+        basis: Any = EventBasis()
+    else:
+        basis = CatalogueYears.from_labels(
+            raw["event_id"], raw["year"], n_years=case["basis"]["n_years"]
+        )
+    loss = np.asarray(raw["loss"], dtype=float)
+    sample = OutcomeSample(index, loss, raw["frequency"], units, basis)
+    return sample, max(1.0, float(loss.sum(axis=1).max()))
+
+
+def _golden_cover(case: dict[str, Any]) -> ParametricCover:
+    """Return a case's cover, a design's template resolved with its parameters.
+
+    A design's limit is the largest-loss rule, which the calibration resolves;
+    the metrics don't read it, so the cover is evaluated without one.
+    """
+    cover = ParametricCover.from_dict({**case["cover"], "limit": None})
+    if case["kind"] == "design":
+        cover = cover.with_values(case["expected"]["parameters"])
+    return cover
+
+
+def _golden_pricing(document: dict[str, Any]) -> Any:
+    """Return a case's pricing."""
+    if document["kind"] == "pure":
+        return PurePremium()
+    return CostOfCapitalLoad(rate=document["rate"], q=document["q"])
+
+
+def _cases(kind: str) -> list[dict[str, Any]]:
+    """Return the golden cases of one kind."""
+    paths = sorted((DATA / "cases").glob("*.json"))
+    cases = [json.loads(path.read_text(encoding="utf-8")) for path in paths]
+    return [case for case in cases if case["kind"] == kind]
+
+
+class TestGolden(unittest.TestCase):
+    """The golden cases, within their stated tolerance."""
+
+    def _check_case(self, case: dict[str, Any]) -> int:
+        """Compare a case's metrics; return how many values were compared."""
+        sample, scale = _golden_sample(case)
+        table = evaluate(
+            _golden_cover(case),
+            sample,
+            split="in_sample",
+            pricing=_golden_pricing(case["pricing"]),
+            options=GOLDEN,
+        )
+        metrics = case["expected"]["metrics"]
+        if case["scope"] == "joint" or "expected_loss" in metrics:
+            targets = {None: metrics}
+        else:
+            targets = metrics
+        compared = 0
+        for unit, values in targets.items():
+            level = (
+                table["level"] == "total" if unit is None else table["unit_id"] == unit
+            )
+            row = table[level].iloc[0]
+            for name, expected in values.items():
+                with self.subTest(case=case["case_id"], unit=unit, metric=name):
+                    self._check_value(expected, float(row[name]), scale, name)
+                compared += 1
+        return compared
+
+    def _check_value(self, expected: Any, got: float, scale: float, name: str) -> None:
+        """Compare one value with the case's tolerances: 1e-6 relative, with floors."""
+        if expected is None:
+            self.assertTrue(math.isnan(got), f"{name} should be null, got {got}")
+            return
+        floor = 1e-9 if name.startswith(UNITLESS) else 1e-9 * scale
+        candidates = expected["either"] if isinstance(expected, dict) else [expected]
+        self.assertTrue(
+            any(abs(got - c) <= max(1e-6 * abs(c), floor) for c in candidates),
+            f"{name}: {got} is not within tolerance of {candidates}",
+        )
+
+    def test_the_copies_are_small_and_licensed(self) -> None:
+        files = [path for path in DATA.rglob("*") if path.is_file()]
+        self.assertLessEqual(sum(path.stat().st_size for path in files), 200_000)
+        for path in sorted((DATA / "samples").glob("*.json")):
+            document = json.loads(path.read_text(encoding="utf-8"))
+            self.assertEqual(document["licence"], "CC0-1.0", path.name)
+
+    def test_evaluate_cases(self) -> None:
+        cases = _cases("evaluate")
+        self.assertEqual(len(cases), 16)
+        compared = sum(self._check_case(case) for case in cases)
+        self.assertGreater(compared, 600)
+
+    def test_design_cases_at_their_parameters(self) -> None:
+        cases = _cases("design")
+        self.assertEqual(len(cases), 32)
+        compared = sum(self._check_case(case) for case in cases)
+        self.assertGreater(compared, 1200)
+
+
+class TestRows(unittest.TestCase):
+    """Rows, premiums and setup of covers and designs."""
+
+    def setUp(self) -> None:
+        sample, _ = random_portfolio(5, n_events=60, n_years=90)
+        self.train, self.test = holdout(sample, train_fraction=0.7)
+        self.cover = ParametricCover(
+            TABLE_WIND,
+            StepPayout.uniform(20.0, 70.0, 4, levels=[50.0, 200.0, 600.0, 1500.0]),
+            unit_id=self.test.unit_id,
+            payout_unit="USD",
+            label="as is",
+        )
+
+    def _design(self, scope: str, pricing: Any = None) -> CalibrationResult:
+        return calibrate(
+            self.train,
+            payout=PAYOUT,
+            objective=WeightedCVaR(alpha=0.9, beta=0.9),
+            scope=scope,
+            pricing=pricing or PurePremium(),
+            budget=1.0,
+        )
+
+    def test_a_cover_given_as_it_is(self) -> None:
+        table = evaluate(self.cover, self.test, split="out_of_sample")
+        self.assertEqual(table["level"].tolist(), ["unit"] * 3 + ["total"])
+        self.assertEqual(table["unit_id"].tolist()[:3], ["U0", "U1", "U2"])
+        self.assertTrue(pd.isna(table["unit_id"].iloc[-1]))
+        self.assertTrue(table["scope"].isna().all())
+        self.assertTrue((table["premium_basis"] == "evaluation").all())
+        self.assertTrue((table["cover_label"] == "as is").all())
+        self.assertTrue((table["cover_hash"] == self.cover.definition_hash).all())
+        self.assertEqual(table["n_years"].tolist(), [27] * 4)
+        self.assertEqual(set(table["route"]), {"catalogue"})
+        self.assertEqual(set(table["index_definition"]), {"table (synthetic): in m/s"})
+        self.assertTrue(table[["unique", "ties", "degenerate_tail"]].isna().all().all())
+        # Under the pure premium the premium is the expected payout, and the unit
+        # premiums add up to the total's.
+        np.testing.assert_allclose(table["premium"], table["expected_payout"])
+        np.testing.assert_allclose(table["premium_repriced"], table["premium"])
+        units, total = table.iloc[:3], table.iloc[3]
+        for name in ("expected_loss", "expected_payout", "premium"):
+            self.assertAlmostEqual(units[name].sum(), total[name], places=6)
+        # Shortfalls net across the units within an event.
+        self.assertLessEqual(
+            total["expected_uncovered"], units["expected_uncovered"].sum() + 1e-9
+        )
+
+    def test_a_cover_is_one_contract_on_its_total(self) -> None:
+        loaded = CostOfCapitalLoad(rate=0.1, q=0.9)
+        table = evaluate(self.cover, self.test, split="in_sample", pricing=loaded)
+        measure = self.test.measure
+        paid = self.cover.payout_matrix(self.test.index)
+        self.assertAlmostEqual(
+            table["premium"].iloc[-1], loaded.premium(paid.sum(axis=1), measure)
+        )
+        self.assertAlmostEqual(
+            table["premium"].iloc[0], loaded.premium(paid[:, 0], measure)
+        )
+        self.assertEqual(table["pricing"].iloc[0], "cost_of_capital(q=0.9, rate=0.1)")
+        # The net loss of a year is its loss less its payout plus the premium.
+        net = measure.aggregate(
+            np.asarray(self.test.loss.sum(axis=1)).ravel() - paid.sum(axis=1)
+        )
+        _, cvar = var_cvar(net + table["premium"].iloc[-1], measure.weights, 0.95)
+        self.assertAlmostEqual(table["cvar_net_loss_b0_95"].iloc[-1], cvar)
+
+    def test_a_stated_premium(self) -> None:
+        table = evaluate(self.cover, self.test, split="out_of_sample", premium=900.0)
+        self.assertEqual(table["premium"].iloc[-1], 900.0)
+        self.assertEqual(
+            table["premium_basis"].tolist(), ["evaluation"] * 3 + ["stated"]
+        )
+        self.assertAlmostEqual(
+            table["premium_repriced"].iloc[-1], table["expected_payout"].iloc[-1]
+        )
+        one, _ = array_sample([[30.0], [60.0]], [[4.0], [10.0]], [0, 1], 10)
+        single = ParametricCover(
+            TABLE_WIND, StepPayout([25.0], [5.0]), unit_id=["U0"], payout_unit="USD"
+        )
+        table = evaluate(single, one, split="in_sample", premium=2.0)
+        self.assertEqual(table["premium_basis"].tolist(), ["stated", "stated"])
+        self.assertEqual(table["premium"].tolist(), [2.0, 2.0])
+
+    def test_an_individual_design(self) -> None:
+        design = self._design("individual")
+        table = evaluate(design, self.test, split="out_of_sample")
+        self.assertEqual(table["level"].tolist(), ["unit"] * 3 + ["total"])
+        self.assertTrue((table["scope"] == "individual").all())
+        self.assertTrue((table["premium_basis"] == "design").all())
+        np.testing.assert_allclose(
+            table["premium"].iloc[:3], [problem.premium for problem in design.problems]
+        )
+        self.assertAlmostEqual(table["premium"].iloc[-1], design.premium)
+        # Repriced on the test years with the design's own pricing.
+        np.testing.assert_allclose(table["premium_repriced"], table["expected_payout"])
+        self.assertTrue(pd.isna(table["degenerate_tail"].iloc[-1]))
+        self.assertEqual(
+            table["cover_hash"].nunique(), 1, "one design, one cover document"
+        )
+
+    def test_a_joint_design(self) -> None:
+        loaded = CostOfCapitalLoad(rate=0.1, q=0.9)
+        design = self._design("portfolio", loaded)
+        table = evaluate(design, self.test, split="out_of_sample")
+        self.assertEqual(table["level"].tolist(), ["total"])
+        self.assertEqual(table["scope"].iloc[0], "joint")
+        self.assertEqual(table["premium"].iloc[0], design.premium)
+        paid = design.payout_matrix(self.test.index).sum(axis=1)
+        self.assertAlmostEqual(
+            table["premium_repriced"].iloc[0], loaded.premium(paid, self.test.measure)
+        )
+        for rule in ("value", "loss"):
+            options = MetricOptions(allocation=rule)
+            rows = evaluate(design, self.test, split="out_of_sample", options=options)
+            with self.subTest(rule=rule):
+                self.assertEqual(
+                    rows["level"].tolist(), ["total"] + [f"unit_by_{rule}"] * 3
+                )
+                shares, total = rows.iloc[1:], rows.iloc[0]
+                sums = ["expected_loss", "expected_payout"]
+                sums += ["expected_uncovered"] if rule == "loss" else []
+                for name in sums:
+                    self.assertAlmostEqual(shares[name].sum(), total[name], places=6)
+                for name in ("premium", "premium_repriced", "cvar_net_loss_b0_9"):
+                    self.assertTrue(shares[name].isna().all(), name)
+                self.assertTrue(shares["premium_basis"].isna().all())
+
+    def test_value_shares_of_a_joint_design(self) -> None:
+        # Units of value 1 and 3: a quarter and three quarters of each payout.
+        sample, _ = array_sample(
+            [[30.0, 30.0], [60.0, 10.0]], [[4.0, 0.0], [10.0, 0.0]], [0, 1], 10
+        )
+        exp = sample.units.exposures.copy()
+        exp.gdf["value"] = [1.0, 3.0]
+        units = InsuredUnits.points(exp)
+        valued = OutcomeSample(
+            sample.index, sample.loss, sample.frequency, units, sample.basis
+        )
+        design = calibrate(
+            valued,
+            payout=StepPayout.uniform(20.0, 70.0, 2),
+            objective=ExpectedUncovered(),
+            scope="portfolio",
+        )
+        table = evaluate(
+            design, valued, split="in_sample", options=MetricOptions(allocation="value")
+        )
+        total = table["expected_payout"].iloc[0]
+        np.testing.assert_allclose(
+            table["expected_payout"].iloc[1:], [0.25 * total, 0.75 * total]
+        )
+
+    def test_degenerate_tails_are_recorded(self) -> None:
+        # 1 - beta below one year's probability, and beta below P(L = 0).
+        expected = {0.999: "single_outcome", 0.05: "expected_uncovered"}
+        for beta, flag in expected.items():
+            design = calibrate(
+                self.train,
+                payout=PAYOUT,
+                objective=WeightedCVaR(alpha=0.9, beta=beta),
+                scope="portfolio",
+                budget=1.0,
+            )
+            table = evaluate(design, self.test, split="out_of_sample")
+            with self.subTest(beta=beta):
+                self.assertEqual(table["degenerate_tail"].iloc[0], flag)
+
+    def test_in_sample_metrics_are_the_objective(self) -> None:
+        for objective in (ExpectedUncovered(), WeightedCVaR(alpha=0.9, beta=0.9)):
+            design = calibrate(
+                self.train,
+                payout=PAYOUT,
+                objective=objective,
+                scope="portfolio",
+                budget=0.8,
+            )
+            row = evaluate(
+                design,
+                self.train,
+                split="in_sample",
+                options=MetricOptions(betas=(0.9,)),
+            ).iloc[0]
+            value = design.problems[0].objective_value
+            if isinstance(objective, WeightedCVaR):
+                found = (
+                    0.9 * row["cvar_uncovered_b0_9"] + 0.1 * row["expected_uncovered"]
+                )
+            else:
+                found = row["expected_uncovered"]
+            with self.subTest(objective=objective):
+                self.assertAlmostEqual(found, value, delta=1e-7 * value)
+
+    def test_on_the_event_basis(self) -> None:
+        on_events, _ = random_portfolio(5, n_events=60, n_years=90, basis="event")
+        table = evaluate(self.cover, on_events, split="in_sample")
+        self.assertTrue((table["basis"] == "event").all())
+        self.assertTrue((table["route"] == "frequency").all())
+        self.assertTrue(table["n_years"].isna().all())
+        self.assertTrue(table["net_loss_rp100"].isna().all())
+
+    def test_folds(self) -> None:
+        folds = year_block_kfold(self.train, 3)
+        test = folds[1][1]
+        table = evaluate(self.cover, test, split="out_of_sample")
+        self.assertTrue((table["fold"] == 1).all())
+        self.assertEqual(table["fold"].dtype, np.int64)
+        with self.assertRaisesRegex(ParametricInputError, "fold 0 is not"):
+            evaluate(self.cover, test, split="out_of_sample", fold=0)
+
+    def test_invalid_arguments_raise(self) -> None:
+        design = self._design("individual")
+        template = ParametricCover(
+            TABLE_WIND, PAYOUT, unit_id=self.test.unit_id, payout_unit="USD"
+        )
+        other = ParametricCover(
+            IndexDefinition("table", unit="m/s", source="elsewhere"),
+            self.cover.payout[self.cover.unit_id[0]],
+            unit_id=self.test.unit_id,
+            payout_unit="USD",
+        )
+        few = ParametricCover(
+            TABLE_WIND, self.cover.payout["U0"], unit_id=["U0"], payout_unit="USD"
+        )
+        cases = [
+            ((self.cover, self.test), {"split": "test"}, "split must be"),
+            ((self.cover, self.test.index), {"split": "in_sample"}, "OutcomeSample"),
+            ((self.cover, self.test), {"split": "in_sample", "fold": -1}, "fold"),
+            ((self.test, self.test), {"split": "in_sample"}, "an entry is"),
+            ((few, self.test), {"split": "in_sample"}, "units are not"),
+            ((other, self.test), {"split": "in_sample"}, "definition"),
+            (
+                (self.cover, self.test),
+                {"split": "in_sample", "pricing": 0.1},
+                "pricing",
+            ),
+            (
+                (self.cover, self.test),
+                {"split": "in_sample", "premium": -1.0},
+                "premium",
+            ),
+            ((self.cover, self.test), {"split": "in_sample", "options": {}}, "options"),
+            (
+                (design, self.test),
+                {"split": "in_sample", "pricing": CostOfCapitalLoad(rate=0.1, q=0.9)},
+                "its own pricing",
+            ),
+        ]
+        for allocated in (self.cover, design):
+            cases.append(
+                (
+                    (allocated, self.test),
+                    {"split": "in_sample", "options": MetricOptions(allocation="loss")},
+                    "joint designs only",
+                )
+            )
+        for args, kwargs, match in cases:
+            with (
+                self.subTest(kwargs=kwargs, match=match),
+                self.assertRaisesRegex(ParametricInputError, match),
+            ):
+                evaluate(*args, **kwargs)
+        with self.assertRaises(UnresolvedParameterError):
+            evaluate(template, self.test, split="in_sample")
+        # The design's own pricing, stated, is accepted.
+        evaluate(design, self.test, split="in_sample", pricing=PurePremium())
+
+    def test_a_cover_that_pays_at_zero_on_left_out_events_is_refused(self) -> None:
+        # The third event has no loss and an index of 0: the sample leaves it out.
+        sample, _ = array_sample(
+            [[30.0], [60.0], [0.0]], [[4.0], [10.0], [0.0]], [0, 1, 2], 10
+        )
+        self.assertEqual(sample.n_left_out, 1)
+        paying = ParametricCover(
+            TABLE_WIND,
+            StepPayout([0.0, 35.0], [1.0, 5.0]),
+            unit_id=["U0"],
+            payout_unit="USD",
+        )
+        for function in (evaluate, compare):
+            entry = paying if function is evaluate else [paying]
+            with self.assertRaisesRegex(ParametricInputError, "left out 1 events"):
+                function(entry, sample, split="in_sample")
+        for function in (payout_impact, uncovered_impact):
+            with self.assertRaisesRegex(ParametricInputError, "left out 1 events"):
+                function(paying, sample)
+        fields = {
+            "payout": StepPayout.uniform(0.0, 70.0, 2),
+            "objective": ExpectedUncovered(),
+            "pricing": PurePremium(),
+            "scope": "individual",
+            "basis": "annual",
+            "budget": None,
+            "unit_id": ("U0",),
+            "levels": [[1.0, 5.0]],
+            "problems": (),
+            "calibration_years": None,
+        }
+        with self.assertRaisesRegex(ParametricInputError, "left out 1 events"):
+            evaluate(CalibrationResult(**fields), sample, split="in_sample")
+        # A first level of 0 pays nothing at an index of 0.
+        unpaid = ParametricCover(
+            TABLE_WIND,
+            StepPayout([0.0, 35.0], [0.0, 5.0]),
+            unit_id=["U0"],
+            payout_unit="USD",
+        )
+        table = evaluate(unpaid, sample, split="in_sample")
+        self.assertAlmostEqual(table["expected_payout"].iloc[-1], 0.5)
+
+
+class TestCompare(unittest.TestCase):
+    """Several entries in one table."""
+
+    def setUp(self) -> None:
+        sample, _ = random_portfolio(7, n_events=50, n_years=80)
+        self.train, self.test = holdout(sample, train_fraction=0.7)
+        self.designs = [
+            calibrate(
+                self.train,
+                payout=PAYOUT,
+                objective=ExpectedUncovered(),
+                scope=scope,
+                budget=1.0,
+            )
+            for scope in ("individual", "portfolio")
+        ]
+        self.cover = ParametricCover(
+            TABLE_WIND,
+            StepPayout([30.0, 50.0], [100.0, 900.0]),
+            unit_id=self.test.unit_id,
+            payout_unit="USD",
+        )
+
+    def test_rows_of_every_entry(self) -> None:
+        table = compare([self.cover, *self.designs], self.test, split="out_of_sample")
+        self.assertEqual(len(table), 4 + 4 + 1)
+        self.assertTrue(pd.isna(table["scope"].iloc[0]))
+        self.assertEqual(table["scope"].iloc[[4, 8]].tolist(), ["individual", "joint"])
+        pd.testing.assert_frame_equal(
+            table.iloc[4:8].reset_index(drop=True),
+            evaluate(self.designs[0], self.test, split="out_of_sample"),
+        )
+
+    def test_allocation_takes_joint_designs_only(self) -> None:
+        options = MetricOptions(allocation="value")
+        table = compare(
+            [self.designs[1]], self.test, split="out_of_sample", options=options
+        )
+        self.assertEqual(table["level"].tolist(), ["total"] + ["unit_by_value"] * 3)
+        with self.assertRaisesRegex(ParametricInputError, r"at \[0, 1\] are not"):
+            compare(
+                [self.cover, *self.designs],
+                self.test,
+                split="in_sample",
+                options=options,
+            )
+
+    def test_invalid_entries_raise(self) -> None:
+        for entries, match in ((self.cover, "sequence"), ([], "at least one")):
+            with self.assertRaisesRegex(ParametricInputError, match):
+                compare(entries, self.test, split="in_sample")
+
+
+class TestImpacts(unittest.TestCase):
+    """Payouts and uncovered losses as CLIMADA ``Impact`` objects."""
+
+    def setUp(self) -> None:
+        self.sample, self.impact = random_portfolio(4)
+        self.design = calibrate(
+            self.sample,
+            payout=PAYOUT,
+            objective=WeightedCVaR(alpha=0.5, beta=0.9),
+            scope="portfolio",
+            budget=1.0,
+        )
+
+    def test_payouts_are_a_climada_impact(self) -> None:
+        paid = payout_impact(self.design, self.sample)
+        self.assertIsInstance(paid, Impact)
+        matrix = self.design.payout_matrix(self.sample.index)
+        np.testing.assert_allclose(paid.imp_mat.toarray(), matrix)
+        np.testing.assert_allclose(paid.at_event, matrix.sum(axis=1))
+        np.testing.assert_allclose(paid.eai_exp, self.sample.frequency @ matrix)
+        np.testing.assert_array_equal(paid.event_id, self.sample.event_id)
+        self.assertEqual(paid.unit, "USD")
+        table = evaluate(self.design, self.sample, split="in_sample")
+        self.assertAlmostEqual(paid.aai_agg, table["expected_payout"].iloc[0])
+        curve = paid.calc_freq_curve()
+        self.assertAlmostEqual(float(np.max(curve.impact)), float(paid.at_event.max()))
+        exceedance = paid.local_exceedance_impact(return_periods=(10, 50))[0]
+        self.assertEqual(len(exceedance), self.sample.units.n_points)
+
+    def test_a_write_hdf5_round_trip(self) -> None:
+        for function in (payout_impact, uncovered_impact):
+            written = function(self.design, self.sample, impact=self.impact)
+            with (
+                tempfile.TemporaryDirectory() as folder,
+                self.subTest(function=function),
+            ):
+                path = Path(folder) / "impact.hdf5"
+                written.write_hdf5(path)
+                read = Impact.from_hdf5(path)
+                np.testing.assert_allclose(
+                    read.imp_mat.toarray(), written.imp_mat.toarray()
+                )
+                np.testing.assert_allclose(read.eai_exp, written.eai_exp)
+                np.testing.assert_array_equal(read.event_id, written.event_id)
+                np.testing.assert_array_equal(read.date, written.date)
+                np.testing.assert_allclose(read.frequency, written.frequency)
+                self.assertEqual(read.unit, written.unit)
+
+    def test_uncovered_losses(self) -> None:
+        shortfall = uncovered_impact(self.design, self.sample)
+        loss = self.sample.loss.toarray()
+        paid = self.design.payout_matrix(self.sample.index)
+        np.testing.assert_allclose(
+            shortfall.imp_mat.toarray(), np.maximum(loss - paid, 0)
+        )
+        self.assertTrue(np.all(shortfall.imp_mat.data >= 0))
+        cover = ParametricCover(
+            TABLE_WIND,
+            PAYOUT.with_values(
+                {f"levels[{k}]": v for k, v in enumerate((50.0, 200.0, 600.0, 900.0))}
+            ),
+            unit_id=self.sample.unit_id,
+            payout_unit="USD",
+        )
+        table = evaluate(cover, self.sample, split="in_sample")
+        self.assertAlmostEqual(
+            uncovered_impact(cover, self.sample).aai_agg,
+            table["expected_uncovered"].iloc[:3].sum(),
+        )
+
+    def test_the_loss_impact_gives_events_dates_and_order(self) -> None:
+        self.impact.date = np.arange(1, self.impact.event_id.size + 1) * 1000
+        paid = payout_impact(self.design, self.sample, impact=self.impact)
+        np.testing.assert_array_equal(paid.event_id, self.impact.event_id)
+        np.testing.assert_array_equal(paid.date, self.impact.date)
+        self.assertEqual(paid.event_name, list(self.impact.event_name))
+        # The same sampling_vect gives the payouts' annual totals.
+        sampling_vect = [np.array([0, 3]), np.array([], dtype=int), np.array([5, 5, 7])]
+        years = impact_yearset_from_sampling_vect(
+            paid, [2001, 2002, 2003], sampling_vect, correction_fac=False
+        )
+        at_event = paid.at_event
+        np.testing.assert_allclose(
+            years.at_event,
+            [at_event[0] + at_event[3], 0.0, 2 * at_event[5] + at_event[7]],
+        )
+        on_years = OutcomeSample.from_impact(
+            self.sample.index,
+            self.impact,
+            units=self.sample.units,
+            basis=YearSets.from_sampling_vect(self.impact.event_id, sampling_vect),
+        )
+        table = evaluate(self.design, on_years, split="in_sample")
+        self.assertAlmostEqual(table["expected_payout"].iloc[0], years.at_event.mean())
+
+    def test_left_out_events_pay_nothing_in_the_loss_impact(self) -> None:
+        sample, impact = array_sample(
+            [[30.0], [60.0], [0.0]], [[4.0], [10.0], [0.0]], [0, 1, 2], 10
+        )
+        cover = ParametricCover(
+            TABLE_WIND,
+            StepPayout([25.0, 50.0], [1.0, 5.0]),
+            unit_id=["U0"],
+            payout_unit="USD",
+        )
+        paid = payout_impact(cover, sample, impact=impact)
+        np.testing.assert_allclose(paid.at_event, [1.0, 5.0, 0.0])
+        np.testing.assert_allclose(
+            uncovered_impact(cover, sample, impact=impact).at_event, [3.0, 5.0, 0.0]
+        )
+        self.assertEqual(payout_impact(cover, sample).event_id.tolist(), [1, 2])
+
+    def test_an_impact_that_does_not_fit_raises(self) -> None:
+        train, _ = holdout(self.sample, train_fraction=0.7)
+        with self.assertRaisesRegex(ParametricInputError, "whole sample"):
+            payout_impact(self.design, train, impact=self.impact)
+        other, other_impact = random_portfolio(4, n_events=41)
+        with self.assertRaisesRegex(EventAlignmentError, "beyond the sample's"):
+            payout_impact(self.design, self.sample, impact=other_impact)
+        fewer = self.impact.select(event_ids=self.impact.event_id[1:])
+        fewer.imp_mat = self.impact.imp_mat[1:]
+        with self.assertRaisesRegex(EventAlignmentError, "in the impact once"):
+            payout_impact(self.design, self.sample, impact=fewer)
+        rescaled = self.impact.select(event_ids=self.impact.event_id)
+        rescaled.frequency = self.impact.frequency * 2
+        with self.assertRaisesRegex(ParametricInputError, "frequencies"):
+            payout_impact(self.design, self.sample, impact=rescaled)
+        self.assertEqual(other.n_events, 41)
+
+    def test_draws_have_no_uncovered_impact(self) -> None:
+        drawn = OutcomeSample(
+            self.sample.index,
+            np.vstack([self.sample.loss.toarray()] * 2),
+            self.sample.frequency,
+            self.sample.units,
+            self.sample.basis,
+            n_draws=2,
+        )
+        self.assertEqual(payout_impact(self.design, drawn).imp_mat.shape[0], 40)
+        with self.assertRaisesRegex(ParametricInputError, "2 draws"):
+            uncovered_impact(self.design, drawn)
+        table = evaluate(self.design, drawn, split="in_sample")
+        self.assertAlmostEqual(
+            table["expected_uncovered"].iloc[0],
+            evaluate(self.design, self.sample, split="in_sample")[
+                "expected_uncovered"
+            ].iloc[0],
+        )
+
+
+if __name__ == "__main__":
+    unittest.main()

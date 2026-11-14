@@ -48,6 +48,7 @@ from climada_petals.engine.parametric import (
     IndexDefinition,
     InsuredUnits,
     LeakageError,
+    MetricOptions,
     OutcomeSample,
     ParametricIndex,
     ParametricInputError,
@@ -56,9 +57,9 @@ from climada_petals.engine.parametric import (
     WeightedCVaR,
     YearRouteError,
     YearSets,
-    basis_risk,
     calibrate,
     check_no_leakage,
+    evaluate,
     holdout,
     labels_from_names,
     sample_years,
@@ -269,7 +270,7 @@ class TestRoutes(unittest.TestCase):
                 for sample in (catalogue, sampled)
             ]
             tables = [
-                basis_risk(sample, covers[0], beta=0.95)
+                evaluate(covers[0], sample, split="in_sample").drop(columns="route")
                 for sample in (catalogue, sampled)
             ]
             with self.subTest(scope=scope, objective=objective):
@@ -341,7 +342,7 @@ class TestRoutes(unittest.TestCase):
                 scope="portfolio",
                 budget=1.0,
             )
-            table = basis_risk(sample, cover, beta=0.95)
+            table = evaluate(cover, sample, split="in_sample")
             with self.subTest(route=sample.route):
                 self.assertGreater(cover.premium, 0.0)
                 self.assertEqual(table["basis"].iloc[-1], sample.kind)
@@ -435,8 +436,12 @@ class TestCatalogueOnClimada(unittest.TestCase):
             with self.subTest(scope=scope):
                 np.testing.assert_array_equal(cover.calibration_years, train.years)
                 self.assertGreater(cover.premium, 0.0)
-                metrics = basis_risk(test, cover, beta=0.99)
-                self.assertEqual(len(metrics), self.exposures.gdf.shape[0] + 1)
+                metrics = evaluate(cover, test, split="out_of_sample")
+                # A joint design has one row, the owner's total.
+                n_units = self.exposures.gdf.shape[0]
+                self.assertEqual(
+                    len(metrics), n_units + 1 if scope == "individual" else 1
+                )
 
     def test_years_the_data_do_not_carry_raise(self) -> None:
         # No storm in year 0: the names span 2500 to 9999, 7,500 years.
@@ -513,11 +518,19 @@ class TestCatalogueOnClimada(unittest.TestCase):
                 scope=scope,
                 budget=1.0,
             )
-            table = basis_risk(sample, cover, beta=0.9)
+            # A joint design has per-unit rows only under a stated allocation.
+            allocation = None if scope == "individual" else "value"
+            table = evaluate(
+                cover,
+                sample,
+                split="in_sample",
+                options=MetricOptions(allocation=allocation),
+            )
+            units = table[table["unit_id"].notna()]
             with self.subTest(scope=scope):
-                self.assertEqual(table["subject"].tolist(), [1, 2, "portfolio"])
+                self.assertEqual(units["unit_id"].tolist(), [1, 2])
                 np.testing.assert_allclose(
-                    table["expected_loss"].iloc[:2], [0.32, 0.56], rtol=1e-12
+                    units["expected_loss"], [0.32, 0.56], rtol=1e-12
                 )
 
 

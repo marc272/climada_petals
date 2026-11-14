@@ -57,6 +57,7 @@ from climada_petals.engine.parametric import (
     calibrate,
 )
 from climada_petals.engine.parametric import index as index_module
+from climada_petals.engine.parametric import payout_impact
 from climada_petals.engine.parametric.test._synthetic import (
     FLOOD_DEPTH,
     POINTS,
@@ -295,7 +296,7 @@ class TestEvents(unittest.TestCase):
             for sample in samples
         ]
         np.testing.assert_allclose(covers[0].levels, covers[1].levels, atol=1e-12)
-        paid = covers[0].payout_impact(self.index, reordered, units=self.units)
+        paid = payout_impact(covers[0], samples[1], impact=reordered)
         np.testing.assert_array_equal(paid.event_id, reordered.event_id)
         unit_paid = covers[0].payout_matrix(self.index)[[2, 0, 1]]
         points = paid.imp_mat.toarray()

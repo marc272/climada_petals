@@ -27,7 +27,6 @@ from types import SimpleNamespace
 from unittest import mock
 
 import numpy as np
-from climada.engine import Impact
 
 from climada_petals.engine.parametric import (
     CalibrationError,
@@ -267,7 +266,7 @@ class TestCover(unittest.TestCase):
     """What a cover returns."""
 
     def setUp(self) -> None:
-        self.sample, self.impact = random_portfolio(4)
+        self.sample, _ = random_portfolio(4)
         self.cover = calibrate(
             self.sample,
             payout=PAYOUT,
@@ -275,26 +274,6 @@ class TestCover(unittest.TestCase):
             scope="portfolio",
             budget=1.0,
         )
-
-    def test_payout_impact_is_a_climada_impact(self) -> None:
-        index, units = self.sample.index, self.sample.units
-        paid = self.cover.payout_impact(index, self.impact, units=units)
-        self.assertIsInstance(paid, Impact)
-        matrix = self.cover.payout_matrix(index)
-        np.testing.assert_allclose(paid.imp_mat.toarray(), matrix)
-        np.testing.assert_allclose(paid.at_event, matrix.sum(axis=1))
-        np.testing.assert_allclose(paid.eai_exp, self.impact.frequency @ matrix)
-        self.assertAlmostEqual(
-            paid.aai_agg, float((self.impact.frequency @ matrix).sum())
-        )
-        np.testing.assert_array_equal(paid.event_id, self.impact.event_id)
-        _, _, others = array_index(np.zeros((1, 2)), np.zeros((1, 2)))
-        for wrong in (others, index):
-            with (
-                self.subTest(units=wrong),
-                self.assertRaisesRegex(ParametricInputError, "cover's unit_id"),
-            ):
-                self.cover.payout_impact(index, self.impact, units=wrong)
 
     def test_tables(self) -> None:
         frame = self.cover.levels_frame()

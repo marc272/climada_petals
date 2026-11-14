@@ -33,6 +33,14 @@ climada\_petals\.engine\.parametric\.errors module
     :undoc-members:
     :show-inheritance:
 
+climada\_petals\.engine\.parametric\.evaluate module
+----------------------------------------------------
+
+.. automodule:: climada_petals.engine.parametric.evaluate
+    :members:
+    :undoc-members:
+    :show-inheritance:
+
 climada\_petals\.engine\.parametric\.index module
 -------------------------------------------------
 
@@ -85,6 +93,14 @@ climada\_petals\.engine\.parametric\.payout module
 --------------------------------------------------
 
 .. automodule:: climada_petals.engine.parametric.payout
+    :members:
+    :undoc-members:
+    :show-inheritance:
+
+climada\_petals\.engine\.parametric\.plots module
+-------------------------------------------------
+
+.. automodule:: climada_petals.engine.parametric.plots
     :members:
     :undoc-members:
     :show-inheritance:

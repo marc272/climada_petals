@@ -49,7 +49,10 @@ joint design problem depends on the units' payouts only through their total
 per event, so other feasible levels with the same totals are optimal too,
 and the linear program can have several optimal solutions besides. The
 levels a portfolio cover holds are the one optimal split the solver
-returned. Read them, and per-unit metrics of a portfolio cover, as that.
+returned. Read them as that: the evaluation
+(:func:`~climada_petals.engine.parametric.evaluate.evaluate`) gives a
+portfolio cover a total row, and per-unit rows only under a stated
+allocation.
 
 The objective, the premium and the budget all use the sample's outcome
 measure (:mod:`~climada_petals.engine.parametric.measure`). On an annual route the
@@ -63,7 +66,7 @@ from __future__ import annotations
 
 from collections.abc import Hashable, Mapping
 from dataclasses import dataclass, field
-from typing import Any, Final, Literal, get_args
+from typing import Final, Literal, get_args
 
 import numpy as np
 import pandas as pd
@@ -81,7 +84,6 @@ from .payout import StepPayout
 from .pricing import CostOfCapitalLoad, Pricing, PurePremium
 from .sample import OutcomeSample, check_left_out_unpaid
 from .solvers import DesignData, SolverInfo, solve_design
-from .units import InsuredUnits
 
 __all__ = [
     "PORTFOLIO",
@@ -242,73 +244,6 @@ class CalibrationResult:
                 f"{list(index.unit_id)[:5]} vs {list(self.unit_id)[:5]}"
             )
         return _paid(self.payout, index.values, self.levels)
-
-    def payout_impact(
-        self, index: ParametricIndex, impact: Any, *, units: InsuredUnits
-    ) -> Any:
-        """Return the payouts as a CLIMADA ``Impact``, aligned with ``impact``.
-
-        Parameters
-        ----------
-        index : ParametricIndex
-            The index the payouts are computed from, with every event of
-            ``impact``.
-        impact : climada.engine.Impact
-            The loss impact of the same events, on the units' exposure
-            points, with ``imp_mat``. Its events, dates, frequencies,
-            coordinates and unit are copied.
-        units : InsuredUnits
-            The insured units, with the cover's ``unit_id`` in order.
-
-        Returns
-        -------
-        climada.engine.Impact
-            ``imp_mat`` holds the payout per event and exposure point, a
-            unit's payout shared among its points by value share
-            (:meth:`~climada_petals.engine.parametric.units.InsuredUnits.to_points`),
-            in the impact's event order; ``at_event`` is its sum over the
-            points, ``eai_exp`` the expected annual payout per point and
-            ``aai_agg`` their sum, so that CLIMADA's tools
-            (``calc_freq_curve``, ``impact_per_year``, the plots) work on
-            the payouts as on the loss.
-
-        Raises
-        ------
-        ParametricInputError
-            If ``units`` are not the cover's.
-        ImpactInputError
-            If ``impact`` is not a loss on the units' exposure points
-            (:meth:`~climada_petals.engine.parametric.units.InsuredUnits.check_impact`).
-        EventAlignmentError
-            If the impact's events are not the index's.
-        """
-        if not isinstance(units, InsuredUnits) or tuple(units.unit_id) != self.unit_id:
-            raise ParametricInputError(
-                "units must be the InsuredUnits of the cover's unit_id, in order"
-            )
-        units.check_impact(impact)
-        payout = np.empty((index.n_events, len(self.unit_id)))
-        payout[index.rows_in(impact)] = self.payout_matrix(index)
-        points = units.to_points(payout)
-        frequency = np.asarray(impact.frequency, dtype=float)
-        eai_exp = np.asarray(points.T @ frequency, dtype=float)
-        impact_class = type(impact)
-        return impact_class(
-            event_id=np.asarray(impact.event_id),
-            event_name=list(impact.event_name),
-            date=np.asarray(impact.date),
-            frequency=frequency,
-            frequency_unit=impact.frequency_unit,
-            coord_exp=np.asarray(impact.coord_exp),
-            crs=impact.crs,
-            eai_exp=eai_exp,
-            at_event=np.asarray(points.sum(axis=1), dtype=float).reshape(-1),
-            tot_value=impact.tot_value,
-            aai_agg=float(eai_exp.sum()),
-            unit=impact.unit,
-            imp_mat=points,
-            haz_type=impact.haz_type,
-        )
 
     def levels_frame(self) -> pd.DataFrame:
         """Return the payout levels as a table.
