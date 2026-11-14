@@ -120,16 +120,22 @@ other.
 
 :func:`evaluate_scenarios` checks an out-of-sample evaluation of a design
 for leakage as :func:`~climada_petals.engine.parametric.evaluate.evaluate`
-does: against every sample, or member of a mixture, that was cut from
-another; and a design on a mixture against the mixture of its scenario's
-other sides. The members of a mixture are different hazard sets, whose
-event ids and blocks say nothing about each other, so the mixture keeps
-them apart (:mod:`~climada_petals.engine.parametric._mixture`): the same
-storm in two members counts as two blocks.
+does, by the samples' source tokens
+(:func:`~climada_petals.engine.parametric.sample.check_out_of_sample`):
+every scenario's sample, and every member of a mixture, of the design
+sample's source is compared with it, whether whole or cut. A mixture has
+the token of its members' tokens, so a design on a mixture is compared
+with the mixtures of the same members' sides, or of the whole members. The
+members of a mixture are different hazard sets, whose event ids and blocks
+say nothing about each other, so the mixture keeps them apart
+(:mod:`~climada_petals.engine.parametric._mixture`): the same storm in two
+members counts as two blocks.
 
 A set scaled by ``apply_climate_scenario_knu`` holds its baseline's events:
 a design calibrated on the baseline has seen every footprint of it, and its
 rows there show the cover under other frequencies, not on unseen events.
+With other frequencies it has another source token, so it is not compared,
+as other exposures or impact functions are not.
 """
 
 from __future__ import annotations
@@ -161,7 +167,7 @@ from .index import ParametricIndex
 from .metrics import MetricOptions
 from .objectives import Objective
 from .pricing import Pricing, PurePremium
-from .sample import Basis, OutcomeSample, check_no_leakage, holdout
+from .sample import Basis, OutcomeSample, check_out_of_sample, holdout
 from .units import InsuredUnits
 
 __all__ = [
@@ -704,26 +710,23 @@ def _splits(split: object, labels: tuple[str, ...]) -> dict[str, Any]:
 def _check_mixture_leakage(
     design: DesignSample, scenarios: ScenarioSet, label: str
 ) -> None:
-    """Check a mixture's cut members against a design (module docstring).
+    """Check a mixture's members against a design (module docstring).
 
-    Every cut member is checked as ``evaluate`` checks a cut sample; a
-    design on this scenario is also checked against the mixture, whose
-    events and blocks carry their member.
+    Every member is checked as ``evaluate`` checks a sample: by its source
+    token. ``evaluate`` checks the mixture itself, whose events and blocks
+    carry their member.
 
     Raises
     ------
     LeakageError
-        If a member, or the mixture, shares an event or a block with the
-        design sample.
+        If a member of the design sample's source shares an event or a
+        block with it.
     """
     group = scenarios.members[label]
-    cut = [member for member in group if member.split is not None]
-    if len(group) == 1 or not cut:
+    if len(group) == 1:
         return
-    for member in cut:
-        check_no_leakage(design, member)
-    if design.scenario == label:
-        check_no_leakage(design, scenarios.sample(label))
+    for member in group:
+        check_out_of_sample(design, member)
 
 
 def evaluate_scenarios(
@@ -772,8 +775,8 @@ def evaluate_scenarios(
         :func:`~climada_petals.engine.parametric.evaluate.evaluate`.
     LeakageError
         If an out-of-sample evaluation of a design meets a sample, or a
-        member of a mixture, that was cut from another and shares an event
-        or a block with the design sample.
+        member of a mixture, of the design sample's source that shares an
+        event or a block with it (module docstring).
 
     Each error from a scenario has a note naming it.
 

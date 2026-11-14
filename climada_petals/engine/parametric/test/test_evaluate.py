@@ -23,6 +23,7 @@ The golden cases are read with :mod:`._golden`.
 
 from __future__ import annotations
 
+import dataclasses
 import itertools
 import json
 import math
@@ -42,6 +43,7 @@ from climada_petals.engine.parametric import (
     CalibrationResult,
     CostOfCapitalLoad,
     EventAlignmentError,
+    EventBasis,
     ExpectedUncovered,
     IndexDefinition,
     InsuredUnits,
@@ -66,6 +68,7 @@ from climada_petals.engine.parametric import (
     var_cvar,
     year_block_kfold,
 )
+from climada_petals.engine.parametric.sample import check_out_of_sample
 from climada_petals.engine.parametric.test._golden import (
     DATA,
     GOLDEN,
@@ -475,7 +478,7 @@ class TestDesigns(unittest.TestCase):
         # Ten catalogue years: the training years 0 to 6 hold indices 30 and
         # 35, in the first step; the test years 7 to 9 hold 60, in the second
         # step, which no training event reaches, and 25.
-        self.sample, _ = array_sample(
+        self.sample, self._impact = array_sample(
             [[30.0], [35.0], [60.0], [25.0]],
             [[4.0], [6.0], [10.0], [2.0]],
             [0, 1, 7, 8],
@@ -516,15 +519,60 @@ class TestDesigns(unittest.TestCase):
         )
         with self.assertRaisesRegex(LeakageError, "events are in both samples"):
             evaluate(whole, self.test, split="out_of_sample")
-        # In sample, or on a whole sample (such as another hazard set's), the
-        # samples are not compared.
+        # In sample, the samples are not compared.
         evaluate(self.design, self.train, split="in_sample")
-        evaluate(self.design, self.sample, split="out_of_sample")
         # Disjoint sides of one split pass.
         evaluate(self.design, self.test, split="out_of_sample")
         check_no_leakage(self.design.design_sample, self.test)
         with self.assertRaisesRegex(ParametricInputError, "design must be"):
             check_no_leakage(self.design, self.test)
+
+    def test_the_uncut_sample_of_a_design_raises(self) -> None:
+        # The design sample, the training side, keeps the token of the whole
+        # sample it was cut from; so does its record.
+        self.assertEqual(self.design.design_sample.source, self.sample.source)
+        with self.assertRaisesRegex(LeakageError, "2 events are in both samples"):
+            evaluate(self.design, self.sample, split="out_of_sample")
+        with self.assertRaisesRegex(LeakageError, "2 events are in both samples"):
+            compare([self.design], self.sample, split="out_of_sample")
+        # The same events built again from the index and the Impact, on
+        # another basis, have the same token.
+        index, impact = self.sample.index, self._impact
+        rebuilt = OutcomeSample.from_impact(
+            index, impact, units=self.sample.units, basis=EventBasis()
+        )
+        self.assertEqual(rebuilt.source, self.sample.source)
+        with self.assertRaisesRegex(LeakageError, "events are in both samples"):
+            evaluate(self.design, rebuilt, split="out_of_sample")
+        evaluate(self.design, self.sample, split="in_sample")
+
+    def test_another_hazard_set_with_the_same_ids_passes(self) -> None:
+        # Another hazard set: the same event ids 1 to 4 in the same years,
+        # with other index values and losses, so another source.
+        other, _ = array_sample(
+            [[32.0], [36.0], [61.0], [26.0]],
+            [[5.0], [6.0], [9.0], [1.0]],
+            [0, 1, 7, 8],
+            10,
+        )
+        np.testing.assert_array_equal(
+            other.event_id, self.train.event_id.tolist() + [3, 4]
+        )
+        self.assertNotEqual(other.source, self.sample.source)
+        table = evaluate(self.design, other, split="out_of_sample")
+        self.assertEqual(list(table["split"]), ["out_of_sample"] * 2)
+        # Its training side shares the design sample's event ids and years by
+        # chance, and passes too: only samples of one source are compared.
+        other_train, _ = holdout(other, train_fraction=0.7)
+        np.testing.assert_array_equal(other_train.event_id, self.train.event_id)
+        evaluate(self.design, other_train, split="out_of_sample")
+        # A record without a token is compared with no sample.
+        record = dataclasses.replace(self.design.design_sample, source=None)
+        check_out_of_sample(record, self.train)
+        with self.assertRaisesRegex(ParametricInputError, "design must be"):
+            check_out_of_sample(self.design, self.train)
+        with self.assertRaisesRegex(ParametricInputError, "sample must be"):
+            check_out_of_sample(record, record)
 
 
 class TestCompare(unittest.TestCase):

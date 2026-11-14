@@ -322,7 +322,7 @@ class DesignSample:
     """What a design records of its design sample.
 
     Enough to state the setup of a design, and for
-    :func:`~climada_petals.engine.parametric.sample.check_no_leakage` to
+    :func:`~climada_petals.engine.parametric.sample.check_out_of_sample` to
     compare an evaluation sample with it.
 
     Attributes
@@ -349,6 +349,10 @@ class DesignSample:
         The simulation years of a sample on catalogue years; else None.
     split : SplitRecord or None
         How the sample was cut from another; None for a whole sample.
+    source : str or None, default None
+        The sample's source token
+        (:attr:`~climada_petals.engine.parametric.sample.OutcomeSample.source`).
+        A record without one is compared with no evaluation sample.
     """
 
     basis: str
@@ -362,6 +366,7 @@ class DesignSample:
     block: NDArray[Any]
     years: NDArray[np.int64] | None
     split: SplitRecord | None
+    source: str | None = None
 
     @classmethod
     def from_sample(cls, sample: OutcomeSample) -> DesignSample:
@@ -378,4 +383,5 @@ class DesignSample:
             block=sample.block,
             years=sample.years,
             split=sample.split,
+            source=sample.source,
         )

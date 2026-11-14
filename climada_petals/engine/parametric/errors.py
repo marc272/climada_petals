@@ -99,8 +99,10 @@ class LeakageError(ParametricInputError):
     """Two samples that must be disjoint share an event or a block.
 
     Examples: a training and a test sample with a common event, or with
-    members of one parent storm on both sides, or a split of catalogue years
-    that no contiguous cut can make without splitting a block.
+    members of one parent storm on both sides, a split of catalogue years
+    that no contiguous cut can make without splitting a block, or a design
+    evaluated "out of sample" on the whole sample its design sample was cut
+    from.
     """
 
 

@@ -33,6 +33,14 @@ climada\_petals\.engine\.parametric\.\_mixture module
     :undoc-members:
     :show-inheritance:
 
+climada\_petals\.engine\.parametric\.\_parts module
+---------------------------------------------------
+
+.. automodule:: climada_petals.engine.parametric._parts
+    :members:
+    :undoc-members:
+    :show-inheritance:
+
 climada\_petals\.engine\.parametric\.\_problem module
 -----------------------------------------------------
 

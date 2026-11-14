@@ -137,14 +137,18 @@ A design is read from its record
 (:class:`~climada_petals.engine.parametric.calibrate.CalibrationResult`): it
 pays by its resolved cover, ``result.cover``; ``unidentified_share`` reads
 the amounts the fill rule set (``result.filled``), and is null for a cover
-given as it is. An **out-of-sample** evaluation of a design on a sample cut
-from another (by :func:`~climada_petals.engine.parametric.sample.holdout`,
-:func:`~climada_petals.engine.parametric.sample.year_block_kfold` or
-``select``) is checked against the design sample
-(:func:`~climada_petals.engine.parametric.sample.check_no_leakage`): a
-shared event or block raises
-:class:`~climada_petals.engine.parametric.errors.LeakageError`. A whole
-sample is not compared, because another hazard set's event ids and years
+given as it is. An **out-of-sample** evaluation of a design is checked
+against the design sample whenever the evaluation sample has its source
+token
+(:func:`~climada_petals.engine.parametric.sample.check_out_of_sample`):
+the whole sample the design sample was cut from, another part of it (by
+:func:`~climada_petals.engine.parametric.sample.holdout`,
+:func:`~climada_petals.engine.parametric.sample.year_block_kfold`,
+``select`` or ``unit``), or the same events built again. A shared event
+or block raises
+:class:`~climada_petals.engine.parametric.errors.LeakageError`. So the
+label "out of sample" is always checked. A sample of another source, such
+as another hazard set, is not compared, because its event ids and years
 can coincide with the design sample's by chance.
 
 CLIMADA objects
@@ -195,7 +199,7 @@ from .metrics import (
     subject_metrics,
 )
 from .pricing import CostOfCapitalLoad, Pricing, PurePremium
-from .sample import OutcomeSample, check_left_out_unpaid, check_no_leakage
+from .sample import OutcomeSample, check_left_out_unpaid, check_out_of_sample
 
 __all__ = [
     "compare",
@@ -313,8 +317,8 @@ def _context(
         is given another pricing than its own, or an allocation is asked of
         an entry that is not a joint design.
     LeakageError
-        If an out-of-sample evaluation of a design, on a sample cut from
-        another, shares an event or a block with the design sample.
+        If an out-of-sample evaluation of a design, on a sample of the
+        design sample's source, shares an event or a block with it.
     """
     pricing, premium, options = stated
     if split not in SPLITS:
@@ -345,9 +349,8 @@ def _context(
             "own terms"
         )
     _check_left_out(found, sample)
-    design = found.design
-    if split == "out_of_sample" and design is not None and sample.split is not None:
-        check_no_leakage(design, sample)
+    if split == "out_of_sample" and found.design is not None:
+        check_out_of_sample(found.design, sample)
     return _Context(
         str(split),
         chosen,
@@ -579,9 +582,10 @@ def evaluate(
     UnresolvedParameterError
         If a cover is a template.
     LeakageError
-        If ``split="out_of_sample"``, the entry is a design and the sample
-        was cut from another, and the sample shares an event or a block
-        with the design sample (module docstring).
+        If ``split="out_of_sample"``, the entry is a design, and the sample
+        has the design sample's source token and shares an event or a block
+        with it, e.g. the whole sample the design sample was cut from
+        (module docstring).
 
     Examples
     --------
@@ -656,6 +660,8 @@ def compare(
     ParametricInputError
         If ``entries`` is empty or not a sequence, an allocation is asked
         and an entry is not a joint design, or :func:`evaluate` raises.
+    LeakageError
+        As :func:`evaluate`, for a design.
     """
     if isinstance(entries, ParametricCover | CalibrationResult) or not isinstance(
         entries, Sequence

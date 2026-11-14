@@ -1047,6 +1047,23 @@ class TestEvaluateScenarios(unittest.TestCase):
                 found.exception.__notes__,
             )
             evaluate_scenarios(design, train, split="in_sample")
+        # The mixtures of the members and of their sides have one source
+        # token, so a whole member or mixture is compared too.
+        whole = ScenarioSet({"w": [first, second]})
+        self.assertEqual(whole.sample("w").source, train.sample("w").source)
+        self.assertNotIn(whole.sample("w").source, (first.source, second.source))
+        for design in (on_mixture, on_member):
+            with self.assertRaisesRegex(LeakageError, "events are in both"):
+                evaluate_scenarios(design, whole, split="out_of_sample")
+        # Another hazard set's side, with the event ids of the design's by
+        # chance, has another source and passes.
+        other, _ = holdout(
+            random_portfolio(9, basis="event")[0], rng=np.random.default_rng(9)
+        )
+        self.assertTrue(np.isin(on_member.design_sample.event_id, other.event_id).any())
+        evaluate_scenarios(
+            on_member, ScenarioSet({"o": [other, other]}), split="out_of_sample"
+        )
 
     def test_the_fold_is_the_members(self) -> None:
         first, _ = random_portfolio(5, basis="event")

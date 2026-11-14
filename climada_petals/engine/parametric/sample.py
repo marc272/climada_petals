@@ -69,28 +69,64 @@ Basis and route            Rule
 
 :func:`check_no_leakage` raises if two samples share an event or a block;
 both splits run it on their sides.
+
+Lineage
+-------
+Every sample has a **source token**, :attr:`OutcomeSample.source`. A whole
+sample's token is the fingerprint of its events: their ids, frequencies,
+index values and losses, with the unit ids, in the order of the event ids,
+whatever the basis. Every part of it keeps that token: the sides of
+:func:`holdout` and :func:`year_block_kfold`, a :meth:`~OutcomeSample.select`
+and a :meth:`~OutcomeSample.unit`. So two samples have one token when they
+hold the same events with the same data, such as two samples of the same
+index and ``Impact`` on two bases, or when one was cut from the other, or
+both from one sample. A mixture of a scenario's members has the token of
+its members' tokens, in order
+(:mod:`~climada_petals.engine.parametric._mixture`).
+
+:func:`check_out_of_sample` compares a design sample with an evaluation
+sample only when they have one token, and then raises on a shared event or
+block, as :func:`check_no_leakage` does. Event ids and years alone can't
+decide it: another hazard set's can coincide with the design sample's by
+chance. A sample of the same events with other frequencies, exposures or
+impact functions (a frequency-scaled set, impact-function draws) has
+another token, as another scenario: it is not compared.
+:func:`~climada_petals.engine.parametric.evaluate.evaluate` runs the check
+on every out-of-sample evaluation of a design, so that label is always
+checked.
 """
 
 from __future__ import annotations
 
 import math
-from collections.abc import Sequence
+from collections.abc import Hashable, Sequence
 from dataclasses import dataclass, field
-from typing import Any, Final, NamedTuple
+from typing import Any
 
 import numpy as np
 import pandas as pd
 import scipy.sparse as sp
 from numpy.typing import ArrayLike, NDArray
 
-from climada_petals.util.config import LOGGER
-
 from ._checks import check_int, check_real, finite_array, read_only
-from ._draws import ImpactLosses, impact_losses, take_events
-from .annual import CatalogueYears, YearSets, sample_years
+from ._draws import ImpactLosses, impact_losses
+from ._parts import (
+    SPLITS,
+    Part,
+    SplitRecord,
+    check_rng,
+    kfold_pairs,
+    no_rng,
+    pool_part,
+    source_token,
+    train_test,
+    unit_part,
+    year_part,
+)
+from .annual import CatalogueYears, YearSets
 from .errors import LeakageError, ParametricInputError, ScenarioError
 from .index import ParametricIndex
-from .measure import CATALOGUE, YEARSETS, EventBasis, OutcomeMeasure
+from .measure import YEARSETS, EventBasis, OutcomeMeasure
 from .units import InsuredUnits
 
 __all__ = [
@@ -100,54 +136,13 @@ __all__ = [
     "SplitRecord",
     "check_left_out_unpaid",
     "check_no_leakage",
+    "check_out_of_sample",
     "holdout",
     "year_block_kfold",
 ]
 
-SPLITS: Final[tuple[str, ...]] = ("holdout", "year_block_kfold", "select")
-"""The values of :attr:`SplitRecord.method`."""
-
 Basis = EventBasis | CatalogueYears | YearSets
 """What an outcome is: an ``EventBasis``, ``CatalogueYears`` or ``YearSets``."""
-
-
-@dataclass(frozen=True)
-class SplitRecord:
-    """How a sample was cut from another.
-
-    Attributes
-    ----------
-    method : {"holdout", "year_block_kfold", "select"}
-        The function or method that made it.
-    side : {"train", "test", "selected"}
-        Which side it is.
-    fold : int
-        The fold of ``year_block_kfold``, else 0.
-    n_folds : int
-        ``k`` of ``year_block_kfold``, else 1.
-    share : float
-        The side's share of the other sample: of its years on catalogue
-        years, of its frequency on the other routes.
-    """
-
-    method: str
-    side: str
-    fold: int
-    n_folds: int
-    share: float
-
-
-class _Part(NamedTuple):
-    """The labels of a side, before its share is known."""
-
-    method: str
-    side: str
-    fold: int = 0
-    n_folds: int = 1
-
-    def record(self, share: float) -> SplitRecord:
-        """Return the side's :class:`SplitRecord`."""
-        return SplitRecord(self.method, self.side, self.fold, self.n_folds, share)
 
 
 @dataclass(frozen=True, eq=False)
@@ -182,6 +177,10 @@ class OutcomeSample:
     n_left_out : int, default 0
         Events of the source left out, because they have no loss and an
         index of 0 at every unit (module docstring).
+    source : str, optional
+        The source token: that of the whole sample this one was cut from,
+        which every part keeps. Default: the fingerprint of the sample's
+        own events (module docstring, "Lineage").
 
     Attributes
     ----------
@@ -209,6 +208,7 @@ class OutcomeSample:
     scenario: str = field(default="baseline", kw_only=True)
     split: SplitRecord | None = field(default=None, kw_only=True)
     n_left_out: int = field(default=0, kw_only=True)
+    source: str | None = field(default=None, kw_only=True, repr=False)
     measure: OutcomeMeasure = field(init=False, repr=False)
 
     def __post_init__(self) -> None:
@@ -230,8 +230,19 @@ class OutcomeSample:
             raise ParametricInputError(
                 f"split must be a SplitRecord, got {self.split!r}"
             )
+        if self.source is not None and (
+            not isinstance(self.source, str) or not self.source
+        ):
+            raise ParametricInputError(
+                f"source must be a non-empty str or None, got {self.source!r}"
+            )
         years = _sample_years(self.basis, self.years)
-        object.__setattr__(self, "loss", _loss(self.loss, shape))
+        loss = _loss(self.loss, shape)
+        if self.source is None:
+            object.__setattr__(
+                self, "source", source_token(self.index, frequency, loss, draws)
+            )
+        object.__setattr__(self, "loss", loss)
         object.__setattr__(self, "frequency", read_only(frequency))
         object.__setattr__(self, "years", years)
         object.__setattr__(self, "n_draws", draws)
@@ -482,12 +493,12 @@ class OutcomeSample:
             If the sample mixes a scenario's members on an annual route.
         """
         _check_sample(self, split=True)
-        part = _Part("select", "selected")
+        part = Part("select", "selected")
         if isinstance(self.basis, CatalogueYears):
-            _no_rng(rng)
-            return _year_part(self, self.basis.check_years(keys), part)
+            no_rng(rng)
+            return year_part(self, self.basis.check_years(keys), part)
         if isinstance(self.basis, YearSets):
-            _check_rng(rng)
+            check_rng(rng)
         elif rng is not None:
             raise ParametricInputError(
                 "a selection on the event basis is not random and takes no rng"
@@ -498,9 +509,36 @@ class OutcomeSample:
             raise ParametricInputError(
                 f"keys that are not blocks of the sample, e.g. {list(unknown[:5])}"
             )
-        return _pool_part(
-            self, np.asarray(pd.Index(self.block).isin(wanted)), rng, part
-        )
+        return pool_part(self, np.asarray(pd.Index(self.block).isin(wanted)), rng, part)
+
+    def unit(self, unit_id: Hashable) -> OutcomeSample:
+        """Return the sample restricted to one insured unit.
+
+        The part holds every event of the sample, with its frequencies,
+        basis, years, draws, label, split record and source token: only the
+        index, the loss and the units are the unit's. So a design on the
+        part is checked against the sample's other parts like a design on
+        the sample (module docstring, "Lineage"). The part's units keep every
+        exposure point, so that payouts map back to the points of the loss
+        ``Impact``; building them logs the other units' points as in no
+        insured unit, and their losses are left out.
+
+        Parameters
+        ----------
+        unit_id : str or int
+            One of :attr:`unit_id`.
+
+        Returns
+        -------
+        OutcomeSample
+            With one unit.
+
+        Raises
+        ------
+        ParametricInputError
+            If the sample has no such unit.
+        """
+        return unit_part(self, unit_id)
 
 
 def holdout(
@@ -548,16 +586,7 @@ def holdout(
         include_low=False,
         include_high=False,
     )
-    if sample.route == CATALOGUE:
-        _no_rng(rng)
-        years = _years(sample)
-        (cut,) = _cuts(sample, [math.floor(fraction * years.size + 1e-9)])
-        train = _year_part(sample, years[:cut], _Part("holdout", "train"))
-        test = _year_part(sample, years[cut:], _Part("holdout", "test"))
-    else:
-        pool = _pools(sample, [fraction], rng)
-        train = _pool_part(sample, pool == 0, rng, _Part("holdout", "train"))
-        test = _pool_part(sample, pool == 1, rng, _Part("holdout", "test"))
+    train, test = train_test(sample, fraction, rng)
     check_no_leakage(train, test)
     return train, test
 
@@ -599,54 +628,7 @@ def year_block_kfold(
         If the sample mixes a scenario's members on an annual route.
     """
     _check_sample(sample, split=True)
-    folds = check_int("k", k, low=2)
-    pairs = []
-    if sample.route == CATALOGUE:
-        _no_rng(rng)
-        years = _years(sample)
-        if years.size < folds:
-            raise ParametricInputError(
-                f"{folds} folds need at least {folds} years, got {years.size}"
-            )
-        cuts = _cuts(
-            sample, [math.floor(i * years.size / folds + 1e-9) for i in range(1, folds)]
-        )
-        bounds = [0, *cuts, years.size]
-        for fold, (start, end) in enumerate(zip(bounds[:-1], bounds[1:])):
-            train_years = np.concatenate([years[:start], years[end:]])
-            pairs.append(
-                (
-                    _year_part(
-                        sample,
-                        train_years,
-                        _Part("year_block_kfold", "train", fold, folds),
-                    ),
-                    _year_part(
-                        sample,
-                        years[start:end],
-                        _Part("year_block_kfold", "test", fold, folds),
-                    ),
-                )
-            )
-    else:
-        pool = _pools(sample, [i / folds for i in range(1, folds)], rng)
-        for fold in range(folds):
-            pairs.append(
-                (
-                    _pool_part(
-                        sample,
-                        pool != fold,
-                        rng,
-                        _Part("year_block_kfold", "train", fold, folds),
-                    ),
-                    _pool_part(
-                        sample,
-                        pool == fold,
-                        rng,
-                        _Part("year_block_kfold", "test", fold, folds),
-                    ),
-                )
-            )
+    pairs = kfold_pairs(sample, check_int("k", k, low=2), rng)
     for train, test in pairs:
         check_no_leakage(train, test)
     return tuple(pairs)
@@ -657,7 +639,8 @@ def check_no_leakage(design: Any, evaluation: OutcomeSample) -> None:
 
     Use it on samples split from one sample, such as the sides of
     :func:`holdout`. Samples of different hazard sets can share event ids
-    or years by chance, so a shared id says nothing about them.
+    or years by chance, so a shared id says nothing about them:
+    :func:`check_out_of_sample` compares only samples of one source.
 
     Parameters
     ----------
@@ -676,11 +659,7 @@ def check_no_leakage(design: Any, evaluation: OutcomeSample) -> None:
     ParametricInputError
         If an argument is neither.
     """
-    if not isinstance(design, OutcomeSample) and not _is_record(design):
-        raise ParametricInputError(
-            "design must be an OutcomeSample or a design's record of one, got "
-            f"{type(design).__name__}"
-        )
+    _check_design(design)
     _check_sample(evaluation)
     events = np.intersect1d(design.event_id, evaluation.event_id)
     if events.size:
@@ -696,11 +675,48 @@ def check_no_leakage(design: Any, evaluation: OutcomeSample) -> None:
         )
 
 
-def _is_record(design: object) -> bool:
-    """Whether ``design`` is a design's record of its sample: events and blocks."""
-    return isinstance(getattr(design, "event_id", None), np.ndarray) and isinstance(
-        getattr(design, "block", None), np.ndarray
-    )
+def check_out_of_sample(design: Any, evaluation: OutcomeSample) -> None:
+    """Raise if a sample of the design sample's source shares an event or a block.
+
+    The check of an out-of-sample evaluation (module docstring, "Lineage").
+    The two are compared only if they have one source token: then the
+    evaluation sample is the whole sample the design sample was cut from,
+    another part of it, or the design sample itself, and
+    :func:`check_no_leakage` decides. Samples of other sources are not
+    compared, since their event ids and years can coincide by chance.
+
+    Parameters
+    ----------
+    design : OutcomeSample or DesignSample
+        As in :func:`check_no_leakage`. A record without a source token is
+        compared with no sample.
+    evaluation : OutcomeSample
+        The sample of the out-of-sample evaluation.
+
+    Raises
+    ------
+    LeakageError
+        If the two have one source and an event, or a block, is in both.
+    ParametricInputError
+        If an argument is neither.
+    """
+    _check_design(design)
+    _check_sample(evaluation)
+    source = getattr(design, "source", None)
+    if source is not None and source == evaluation.source:
+        check_no_leakage(design, evaluation)
+
+
+def _check_design(design: object) -> None:
+    """Raise unless ``design`` is a sample or a design's record of one."""
+    if not isinstance(design, OutcomeSample) and not (
+        isinstance(getattr(design, "event_id", None), np.ndarray)
+        and isinstance(getattr(design, "block", None), np.ndarray)
+    ):
+        raise ParametricInputError(
+            "design must be an OutcomeSample or a design's record of one, got "
+            f"{type(design).__name__}"
+        )
 
 
 def check_left_out_unpaid(sample: OutcomeSample, paid_at_zero: ArrayLike) -> None:
@@ -772,14 +788,6 @@ def _check_sample(sample: object, *, split: bool = False) -> None:
         raise ScenarioError(refusal)
 
 
-def _no_rng(rng: object) -> None:
-    """Raise if an ``rng`` is given where the split takes none."""
-    if rng is not None:
-        raise ParametricInputError(
-            "catalogue years are split into contiguous years and take no rng"
-        )
-
-
 def _sample_years(basis: Basis, years: ArrayLike | None) -> NDArray[np.int64] | None:
     """Return the sample's years: catalogue years only, all of them by default."""
     if not isinstance(basis, CatalogueYears):
@@ -787,11 +795,6 @@ def _sample_years(basis: Basis, years: ArrayLike | None) -> NDArray[np.int64] | 
             raise ParametricInputError("years are taken on catalogue years only")
         return None
     return read_only(basis.years if years is None else basis.check_years(years))
-
-
-def _years(sample: OutcomeSample) -> NDArray[np.int64]:
-    """Return the years of a catalogue sample."""
-    return np.asarray(sample.years, dtype=np.int64)
 
 
 def _loss(loss: Any, shape: tuple[int, int]) -> sp.csr_matrix:
@@ -817,182 +820,3 @@ def _loss(loss: Any, shape: tuple[int, int]) -> sp.csr_matrix:
     for part in (matrix.data, matrix.indices, matrix.indptr):
         part.setflags(write=False)
     return matrix
-
-
-def _part(
-    sample: OutcomeSample,
-    chosen: NDArray[np.bool_],
-    *,
-    basis: Basis,
-    frequency: NDArray[np.float64],
-    split: SplitRecord,
-    years: NDArray[np.int64] | None = None,
-) -> OutcomeSample:
-    """Return the sample's events where ``chosen``, on their new basis.
-
-    Raises
-    ------
-    ParametricInputError
-        If no event is chosen.
-    """
-    if not chosen.any():
-        raise ParametricInputError(
-            f"the {split.side} side of the split ({split.method}, fold "
-            f"{split.fold}) holds no event"
-        )
-    return OutcomeSample(
-        take_events(sample.index, np.flatnonzero(chosen)),
-        sample.loss[np.tile(chosen, sample.n_draws)],
-        frequency,
-        sample.units,
-        basis,
-        years=years,
-        n_draws=sample.n_draws,
-        scenario=sample.scenario,
-        split=split,
-        n_left_out=sample.n_left_out,
-    )
-
-
-def _year_part(
-    sample: OutcomeSample, years: NDArray[np.int64], part: _Part
-) -> OutcomeSample:
-    """Return the catalogue sample's events in ``years``, over those years."""
-    chosen = np.isin(np.asarray(sample.event_year), years)
-    return _part(
-        sample,
-        chosen,
-        basis=sample.basis,
-        frequency=sample.frequency[chosen],
-        split=part.record(years.size / _years(sample).size),
-        years=years,
-    )
-
-
-def _pool_part(
-    sample: OutcomeSample,
-    chosen: NDArray[np.bool_],
-    rng: Any,
-    part: _Part,
-) -> OutcomeSample:
-    """Return the events of a pool, their frequencies divided by its share.
-
-    On year sets the pool's ``round(share N)`` years (at least one) are
-    sampled from its events alone, with ``rng``, which the caller checked.
-
-    Raises
-    ------
-    ParametricInputError
-        If the pool holds no event or no frequency.
-    """
-    total = float(sample.frequency.sum())
-    share = float(sample.frequency[chosen].sum()) / total if total > 0 else 0.0
-    if share <= 0:
-        raise ParametricInputError(
-            f"the {part.side} side of the split ({part.method}) holds no frequency"
-        )
-    frequency = sample.frequency[chosen] / share
-    basis: Basis = sample.basis
-    if isinstance(basis, YearSets):
-        basis = YearSets(
-            sample.event_id[chosen],
-            sample_years(frequency, max(1, round(share * basis.n_years)), rng),
-            block=sample.block[chosen],
-            frequency=frequency,
-        )
-    return _part(
-        sample, chosen, basis=basis, frequency=frequency, split=part.record(share)
-    )
-
-
-def _check_rng(rng: object) -> None:
-    """Raise unless ``rng`` is a ``numpy.random.Generator``."""
-    if not isinstance(rng, np.random.Generator):
-        raise ParametricInputError(
-            "year sets and the event basis are split into pools of blocks drawn at "
-            "random, and year sets sample each part's years: pass rng, a "
-            "numpy.random.Generator such as "
-            f"numpy.random.default_rng(seed); got {type(rng).__name__}"
-        )
-
-
-def _pools(sample: OutcomeSample, edges: list[float], rng: Any) -> NDArray[np.intp]:
-    """Return each event's pool: blocks in a shuffled order, filled by frequency.
-
-    ``edges`` are the cumulative shares that end the pools but the last. A
-    block goes to the pool that holds the middle of its frequency.
-
-    Raises
-    ------
-    ParametricInputError
-        If ``rng`` is missing, the sample holds no frequency, or a pool gets
-        no block.
-    """
-    _check_rng(rng)
-    codes, labels = pd.factorize(sample.block)
-    weight = np.bincount(codes, weights=sample.frequency, minlength=len(labels))
-    total = float(weight.sum())
-    if total <= 0:
-        raise ParametricInputError("the sample's frequencies sum to 0")
-    order = rng.permutation(len(labels))
-    cumulative = np.cumsum(weight[order])
-    pool = np.empty(len(labels), dtype=np.intp)
-    pool[order] = np.searchsorted(
-        edges, (cumulative - weight[order] / 2) / total, side="right"
-    )
-    if np.unique(pool).size < len(edges) + 1:
-        raise ParametricInputError(
-            f"{len(labels)} blocks can't fill {len(edges) + 1} pools of frequency; "
-            "the sample has too few blocks for this split"
-        )
-    return pool[codes]
-
-
-def _cuts(sample: OutcomeSample, targets: list[int]) -> list[int]:
-    """Return the cut nearest each target that keeps every block on one side.
-
-    A cut ``c`` puts the sample's first ``c`` years on one side. Without
-    block labels every year is a block, so every cut is valid.
-
-    Raises
-    ------
-    ParametricInputError
-        If a target leaves a side without a year.
-    LeakageError
-        If no valid cut is left, or two folds would meet.
-    """
-    years = _years(sample)
-    n_years = years.size
-    if any(not 1 <= target <= n_years - 1 for target in targets):
-        raise ParametricInputError(
-            f"the split of {n_years} years at {targets} leaves a side without a "
-            "year; every side needs at least one year"
-        )
-    position = pd.Index(years).get_indexer(sample.event_year)
-    codes, labels = pd.factorize(sample.block)
-    low = np.full(len(labels), n_years)
-    high = np.full(len(labels), -1)
-    np.minimum.at(low, codes, position)
-    np.maximum.at(high, codes, position)
-    # A cut c splits a block whose years run from low to high iff low < c <= high.
-    crossing = np.zeros(n_years + 2, dtype=np.int64)
-    np.add.at(crossing, low + 1, 1)
-    np.add.at(crossing, high + 1, -1)
-    valid = np.flatnonzero(np.cumsum(crossing)[1:n_years] == 0) + 1
-    if valid.size == 0:
-        raise LeakageError(
-            f"every cut of the {n_years} years splits a block: blocks have years "
-            "far apart. Number the member-years of one parent next to each other, "
-            "e.g. n_members x (calendar_year - first) + member, with the parent as "
-            "block (CatalogueYears.from_labels)"
-        )
-    cuts = [int(valid[np.argmin(np.abs(valid - target))]) for target in targets]
-    if np.any(np.diff(cuts) <= 0):
-        raise LeakageError(
-            f"the blocks leave too few valid cuts of the {n_years} years for "
-            f"{len(targets) + 1} sides"
-        )
-    moved = [(target, cut) for target, cut in zip(targets, cuts) if cut != target]
-    if moved:
-        LOGGER.info("split: cuts moved to keep the blocks whole: %s", moved)
-    return cuts

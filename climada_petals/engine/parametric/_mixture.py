@@ -68,6 +68,11 @@ a mixture keeps them apart:
   members, such as two windows of a pathway, counts as two blocks.
 * **Draws**: the members have the same number of draws, and the rows are
   ordered by draw, then event, as in any sample.
+* **Source**: the mixture's source token is that of its members' tokens,
+  in order (:func:`~climada_petals.engine.parametric._parts.mixture_token`).
+  The mixture of the whole members and the mixtures of their sides number
+  their events alike, and have one token, so that an evaluation compares
+  them (:func:`~climada_petals.engine.parametric.sample.check_out_of_sample`).
 
 **Splits.** On an annual route a split of a mixture would not mix its
 members' sides: on year sets each side would sample its years from the
@@ -101,6 +106,7 @@ import scipy.sparse as sp
 from numpy.typing import ArrayLike, NDArray
 
 from ._checks import finite_array, read_only
+from ._parts import mixture_token
 from .annual import CatalogueYears, YearSets
 from .errors import ParametricInputError, ScenarioError, YearRouteError
 from .index import ParametricIndex
@@ -711,7 +717,8 @@ def mixture_sample(label: str, members: Sequence[OutcomeSample]) -> OutcomeSampl
     -------
     OutcomeSample
         A whole sample (``split`` None) of the members' events (module
-        docstring), with the sum of their ``n_left_out``.
+        docstring), with the sum of their ``n_left_out`` and the token of
+        their source tokens.
     """
     first = members[0]
     event_id = _event_ids(members)
@@ -734,4 +741,5 @@ def mixture_sample(label: str, members: Sequence[OutcomeSample]) -> OutcomeSampl
         n_draws=first.n_draws,
         scenario=label,
         n_left_out=sum(member.n_left_out for member in members),
+        source=mixture_token([str(member.source) for member in members]),
     )
