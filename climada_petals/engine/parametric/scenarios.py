@@ -149,7 +149,7 @@ the cover under other frequencies on unseen events.
 
 from __future__ import annotations
 
-from collections.abc import Callable, Hashable, Mapping
+from collections.abc import Hashable, Mapping
 from dataclasses import dataclass, field
 from functools import partial
 from types import MappingProxyType
@@ -157,27 +157,27 @@ from typing import Any
 
 import numpy as np
 import pandas as pd
-from climada.engine import ImpactCalc
 from climada.hazard import Hazard
 
-from ._mixture import (
-    as_sequence,
-    labelled_items,
-    mixture_sample,
-    scenario_members,
-    where,
-)
+from ._mixture import labelled_items, mixture_sample, scenario_members, where
 from ._parts import member_sides
+from ._scenario_samples import (
+    BasisSource,
+    HazardSetup,
+    built_samples,
+    hazard_sample,
+    impact_sample,
+    is_pair,
+)
 from .calibrate import CalibrationOptions, CalibrationResult, DesignSample, calibrate
 from .constraints import Budget
 from .cover import IndexDefinition, ParametricCover
 from .errors import ParametricError, ParametricInputError
 from .evaluate import evaluate
-from .index import ParametricIndex
 from .metrics import MetricOptions
 from .objectives import Objective
 from .pricing import Pricing, PurePremium
-from .sample import Basis, OutcomeSample, check_no_leakage, check_out_of_sample, holdout
+from .sample import OutcomeSample, check_no_leakage, check_out_of_sample, holdout
 from .units import InsuredUnits
 
 __all__ = [
@@ -186,137 +186,6 @@ __all__ = [
     "designs_table",
     "evaluate_scenarios",
 ]
-
-BasisSource = Basis | Callable[[Any], Basis]
-"""A basis for every member, or a function of a member's hazard or impact."""
-
-
-def _for_label(value: Any, label: str, what: str) -> Any:
-    """Return ``value``, or its entry for ``label`` if it is a mapping by label.
-
-    Raises
-    ------
-    ParametricInputError
-        If a mapping has no entry for ``label``.
-    """
-    if not isinstance(value, Mapping):
-        return value
-    if label not in value:
-        raise ParametricInputError(f"{what} has no entry for scenario {label!r}")
-    return value[label]
-
-
-def _basis_for(basis: BasisSource, source: Any) -> Any:
-    """Return the basis, or the basis a function gives for a hazard or an impact."""
-    if callable(basis):
-        return basis(source)
-    return basis
-
-
-def _is_pair(value: object) -> bool:
-    """Whether ``value`` is an index and an impact, as a tuple."""
-    return (
-        isinstance(value, tuple)
-        and len(value) == 2
-        and isinstance(value[0], ParametricIndex)
-    )
-
-
-@dataclass(frozen=True)
-class _HazardSetup:
-    """The arguments of :meth:`ScenarioSet.from_hazards` but the hazards."""
-
-    definition: IndexDefinition
-    units: Any
-    impact_funcs: Any
-    basis: BasisSource
-    index_units: InsuredUnits | None
-
-
-def _hazard_sample(hazard: Any, label: str, *, setup: _HazardSetup) -> OutcomeSample:
-    """Return the sample of one hazard set: its index, its impact and its basis.
-
-    Raises
-    ------
-    ParametricInputError
-        If ``hazard`` is not a ``Hazard``, or ``index_units`` has other unit
-        ids than the scenario's units.
-    """
-    if not isinstance(hazard, Hazard):
-        raise ParametricInputError(
-            f"a member is a climada Hazard, got {type(hazard).__name__}"
-        )
-    units = _for_label(setup.units, label, "units")
-    index_units = units if setup.index_units is None else setup.index_units
-    if tuple(index_units.unit_id) != tuple(units.unit_id):
-        raise ParametricInputError(
-            f"index_units has the units {list(index_units.unit_id)[:5]} and the "
-            f"scenario {list(units.unit_id)[:5]}: they must be the same unit ids, in "
-            "order"
-        )
-    index = ParametricIndex.from_definition(setup.definition, hazard, index_units)
-    impact = ImpactCalc(
-        units.exposures.copy(),
-        _for_label(setup.impact_funcs, label, "impact_funcs"),
-        hazard,
-    ).impact(save_mat=True)
-    return OutcomeSample.from_impact(
-        index,
-        impact,
-        units=units,
-        basis=_basis_for(setup.basis, hazard),
-        scenario=label,
-    )
-
-
-def _impact_sample(
-    pair: Any, label: str, *, units: Any, basis: BasisSource
-) -> OutcomeSample:
-    """Return the sample of one index and impact.
-
-    Raises
-    ------
-    ParametricInputError
-        If ``pair`` is not a tuple of an index and an impact.
-    """
-    if not _is_pair(pair):
-        raise ParametricInputError(
-            "a member is a tuple (index, impact), with a ParametricIndex first; "
-            f"got {type(pair).__name__}"
-        )
-    return OutcomeSample.from_impact(
-        pair[0],
-        pair[1],
-        units=_for_label(units, label, "units"),
-        basis=_basis_for(basis, pair[1]),
-        scenario=label,
-    )
-
-
-def _built(
-    members: object,
-    is_one: Callable[[object], bool],
-    build: Callable[[Any, str], OutcomeSample],
-    method: str,
-) -> dict[str, list[OutcomeSample]]:
-    """Return each label's samples, ``build(item, label)`` for each of its items.
-
-    A label maps to one item (``is_one``) or a non-empty sequence of them.
-    An error has a note naming the method, the scenario and the member.
-    """
-    samples: dict[str, list[OutcomeSample]] = {}
-    for label, value in labelled_items(members):
-        items = (value,) if is_one(value) else as_sequence(value, f"scenario {label!r}")
-        for position, item in enumerate(items):
-            try:
-                samples.setdefault(label, []).append(build(item, label))
-            except (ParametricError, ValueError) as error:
-                error.add_note(
-                    f"raised by ScenarioSet.{method} at "
-                    + where(label, position, len(items))
-                )
-                raise
-    return samples
 
 
 @dataclass(frozen=True, eq=False, repr=False)
@@ -442,6 +311,16 @@ class ScenarioSet:
     def fold(self, label: str) -> int:
         """Return the fold a scenario's members were cut as; 0 for whole samples.
 
+        Parameters
+        ----------
+        label : str
+            The scenario.
+
+        Returns
+        -------
+        int
+            The ``fold`` of the members' split, or 0 if they are whole.
+
         Raises
         ------
         ParametricInputError
@@ -519,7 +398,10 @@ class ScenarioSet:
 
         Returns
         -------
-        train, test : ScenarioSet
+        train : ScenarioSet
+            The training sides of the members, under the same labels.
+        test : ScenarioSet
+            The test sides of the members, under the same labels.
 
         Raises
         ------
@@ -600,10 +482,10 @@ class ScenarioSet:
             As the class.
         """
         return cls(
-            _built(
+            built_samples(
                 members,
-                _is_pair,
-                partial(_impact_sample, units=units, basis=basis),
+                is_pair,
+                partial(impact_sample, units=units, basis=basis),
                 "from_impacts",
             )
         )
@@ -707,12 +589,12 @@ class ScenarioSet:
             raise ParametricInputError(
                 f"index_units must be InsuredUnits or None, got {index_units!r}"
             )
-        setup = _HazardSetup(definition, units, impact_funcs, basis, index_units)
+        setup = HazardSetup(definition, units, impact_funcs, basis, index_units)
         return cls(
-            _built(
+            built_samples(
                 members,
                 lambda value: isinstance(value, Hazard),
-                partial(_hazard_sample, setup=setup),
+                partial(hazard_sample, setup=setup),
                 "from_hazards",
             )
         )
@@ -799,7 +681,11 @@ def evaluate_scenarios(
         Which each scenario's sample is for the entry: one for every
         scenario, or one per label, e.g. a design's own scenario in sample
         and the others out of sample.
-    pricing, premium, options
+    pricing : PurePremium or CostOfCapitalLoad, optional
+        As in :func:`~climada_petals.engine.parametric.evaluate.evaluate`.
+    premium : float, optional
+        As in :func:`~climada_petals.engine.parametric.evaluate.evaluate`.
+    options : MetricOptions, default MetricOptions()
         As in :func:`~climada_petals.engine.parametric.evaluate.evaluate`.
 
     Returns
@@ -887,7 +773,13 @@ def calibrate_per_scenario(
     scope : {"individual", "joint"}
         As for :func:`~climada_petals.engine.parametric.calibrate.calibrate`.
         Required.
-    pricing, budget, options
+    pricing : PurePremium or CostOfCapitalLoad, default PurePremium()
+        As for :func:`~climada_petals.engine.parametric.calibrate.calibrate`,
+        for every scenario.
+    budget : Budget, optional
+        As for :func:`~climada_petals.engine.parametric.calibrate.calibrate`,
+        for every scenario.
+    options : CalibrationOptions, default CalibrationOptions()
         As for :func:`~climada_petals.engine.parametric.calibrate.calibrate`,
         for every scenario.
 
