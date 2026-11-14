@@ -1,6 +1,14 @@
 climada\_petals\.engine\.parametric package
 ===========================================
 
+climada\_petals\.engine\.parametric\.annual module
+--------------------------------------------------
+
+.. automodule:: climada_petals.engine.parametric.annual
+    :members:
+    :undoc-members:
+    :show-inheritance:
+
 climada\_petals\.engine\.parametric\.calibrate module
 -----------------------------------------------------
 
@@ -93,6 +101,14 @@ climada\_petals\.engine\.parametric\.riskmeasures module
 --------------------------------------------------------
 
 .. automodule:: climada_petals.engine.parametric.riskmeasures
+    :members:
+    :undoc-members:
+    :show-inheritance:
+
+climada\_petals\.engine\.parametric\.sample module
+--------------------------------------------------
+
+.. automodule:: climada_petals.engine.parametric.sample
     :members:
     :undoc-members:
     :show-inheritance:

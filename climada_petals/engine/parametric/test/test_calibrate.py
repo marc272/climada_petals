@@ -20,7 +20,6 @@ Tests of the calibration: hand-worked designs, the LP against numpy, the scopes.
 
 from __future__ import annotations
 
-import copy
 import importlib.util
 import itertools
 import unittest
@@ -28,30 +27,28 @@ from types import SimpleNamespace
 from unittest import mock
 
 import numpy as np
-import scipy.sparse as sp
 from climada.engine import Impact
-from numpy.typing import ArrayLike, NDArray
 
 from climada_petals.engine.parametric import (
     CalibrationError,
     CalibrationResult,
     CostOfCapitalLoad,
+    EventBasis,
     ExpectedUncovered,
     Free,
     MeanSquaredError,
     MissingDependencyError,
+    OutcomeSample,
     ParametricIndex,
     ParametricInputError,
     PurePremium,
     StepPayout,
     WeightedCVaR,
     calibrate,
-    outcome_measure,
 )
-from climada_petals.engine.parametric.calibrate import loss_matrix
-from climada_petals.engine.parametric.measure import OutcomeMeasure
 from climada_petals.engine.parametric.test._synthetic import (
     array_index,
+    array_sample,
     random_portfolio,
 )
 from climada_petals.util.config import LOGGER
@@ -61,40 +58,24 @@ PAYOUT = StepPayout.uniform(attachment=20.0, exhaustion=70.0, n_steps=4)
 RTOL = 1e-7
 
 
-def _hand_example(drop_quiet_event: bool = False) -> tuple[ParametricIndex, Impact]:
+def _hand_example(drop_quiet_event: bool = False) -> OutcomeSample:
     """One unit, 10 years: (index 30, loss 4), (60, 10) and (5, 0) in years 0-2."""
     values = [[30.0], [60.0], [5.0]]
     loss = [[4.0], [10.0], [0.0]]
     years = [0, 1, 2]
     if drop_quiet_event:
         values, loss, years = values[:2], loss[:2], years[:2]
-    return array_index(values, loss, years, 10)
-
-
-def _measure(
-    index: ParametricIndex, cover: CalibrationResult, years: ArrayLike | None = None
-) -> tuple[NDArray[np.bool_], OutcomeMeasure]:
-    mask = index.event_mask(years)
-    return mask, outcome_measure(
-        index.event_year[mask],
-        index.frequency[mask],
-        basis=cover.basis,
-        years=index.check_years(years),
-        n_catalogue_years=index.years.size,
-    )
+    return array_sample(values, loss, years, 10)[0]
 
 
 class TestHandWorkedDesigns(unittest.TestCase):
     """Designs small enough to solve by hand."""
 
     def test_expected_uncovered_spends_the_budget(self) -> None:
-        index, impact = _hand_example()
         cover = calibrate(
-            index,
-            impact,
+            _hand_example(),
             payout=StepPayout.uniform(20.0, 70.0, 2),
             objective=ExpectedUncovered(),
-            basis="annual",
             budget=0.5,
         )
         (problem,) = cover.problems
@@ -107,13 +88,10 @@ class TestHandWorkedDesigns(unittest.TestCase):
     def test_zero_mode_ignores_a_quiet_event_below_the_attachment(self) -> None:
         values = []
         for drop in (False, True):
-            index, impact = _hand_example(drop_quiet_event=drop)
             cover = calibrate(
-                index,
-                impact,
+                _hand_example(drop_quiet_event=drop),
                 payout=StepPayout.uniform(20.0, 70.0, 2),
                 objective=ExpectedUncovered(),
-                basis="annual",
                 budget=0.5,
             )
             values.append((cover.problems[0].objective_value, cover.premium))
@@ -121,13 +99,10 @@ class TestHandWorkedDesigns(unittest.TestCase):
 
     @unittest.skipUnless(HAS_CVXPY, "the mean squared error needs cvxpy")
     def test_mean_squared_error_pays_nothing_below_the_attachment(self) -> None:
-        index, impact = _hand_example()
         cover = calibrate(
-            index,
-            impact,
+            _hand_example(),
             payout=StepPayout.uniform(20.0, 70.0, 2),
             objective=MeanSquaredError(),
-            basis="annual",
             budget=5.0,
         )
         # An interior-point solution approaches a level at its cap only to
@@ -149,20 +124,18 @@ class TestLinearProgram(unittest.TestCase):
             (PurePremium(), CostOfCapitalLoad(rate=0.1, q=0.9)),
         )
         for seed, scope, basis, objective, pricing in cases:
-            index, impact = random_portfolio(seed)
+            sample, _ = random_portfolio(seed, basis=basis)
             cover = calibrate(
-                index,
-                impact,
+                sample,
                 payout=PAYOUT,
                 objective=objective,
-                basis=basis,
                 scope=scope,
                 pricing=pricing,
                 budget=0.6,
             )
-            mask, measure = _measure(index, cover)
-            loss = impact.imp_mat.toarray()[mask]
-            paid = cover.payout_matrix(index)[mask]
+            measure = sample.measure.as_probability()
+            loss = sample.loss.toarray()
+            paid = cover.payout_matrix(sample.index)
             caps = loss.max(axis=0)
             with self.subTest(seed=seed, scope=scope, basis=basis, objective=objective):
                 self.assertTrue(
@@ -189,15 +162,10 @@ class TestLinearProgram(unittest.TestCase):
                     )
 
     def test_alpha_zero_is_expected_uncovered(self) -> None:
-        index, impact = random_portfolio(2)
-        common = {
-            "payout": PAYOUT,
-            "basis": "annual",
-            "scope": "portfolio",
-            "budget": 0.5,
-        }
-        mean = calibrate(index, impact, objective=ExpectedUncovered(), **common)
-        mixed = calibrate(index, impact, objective=WeightedCVaR(0.0, 0.95), **common)
+        sample, _ = random_portfolio(2)
+        common = {"payout": PAYOUT, "scope": "portfolio", "budget": 0.5}
+        mean = calibrate(sample, objective=ExpectedUncovered(), **common)
+        mixed = calibrate(sample, objective=WeightedCVaR(0.0, 0.95), **common)
         np.testing.assert_allclose(
             mixed.problems[0].objective_value,
             mean.problems[0].objective_value,
@@ -207,18 +175,13 @@ class TestLinearProgram(unittest.TestCase):
     def test_a_beta_below_the_loss_free_mass_gives_the_expected_uncovered_design(
         self,
     ) -> None:
-        index, impact = random_portfolio(3)
-        common = {
-            "payout": PAYOUT,
-            "basis": "annual",
-            "scope": "portfolio",
-            "budget": 0.5,
-        }
-        mean = calibrate(index, impact, objective=ExpectedUncovered(), **common)
+        sample, _ = random_portfolio(3)
+        common = {"payout": PAYOUT, "scope": "portfolio", "budget": 0.5}
+        mean = calibrate(sample, objective=ExpectedUncovered(), **common)
         zero = mean.problems[0].diagnostics["zero_loss_probability"]
         self.assertGreater(zero, 0.1)
         alpha, beta = 0.9, zero / 2
-        tail = calibrate(index, impact, objective=WeightedCVaR(alpha, beta), **common)
+        tail = calibrate(sample, objective=WeightedCVaR(alpha, beta), **common)
         problem = tail.problems[0]
         self.assertTrue(problem.diagnostics["degenerate_tail"])
         np.testing.assert_allclose(
@@ -229,14 +192,12 @@ class TestLinearProgram(unittest.TestCase):
 
     def test_a_tail_within_one_outcome_is_recorded_and_logged(self) -> None:
         # 60 years: one outcome has probability 1/60, more than 1 - beta.
-        index, impact = random_portfolio(2)
+        sample, _ = random_portfolio(2)
         with self.assertLogs(LOGGER, "WARNING") as logs:
             cover = calibrate(
-                index,
-                impact,
+                sample,
                 payout=PAYOUT,
                 objective=WeightedCVaR(alpha=0.9, beta=0.99),
-                basis="annual",
                 scope="portfolio",
                 budget=0.5,
             )
@@ -245,7 +206,7 @@ class TestLinearProgram(unittest.TestCase):
         self.assertIn("single worst outcome", "\n".join(logs.output))
 
     def test_a_failed_solve_raises(self) -> None:
-        index, impact = random_portfolio(0)
+        sample, _ = random_portfolio(0)
         failed = SimpleNamespace(status=4, message="numerical trouble", x=None, nit=0)
         with (
             mock.patch(
@@ -253,13 +214,7 @@ class TestLinearProgram(unittest.TestCase):
             ),
             self.assertRaisesRegex(CalibrationError, "numerical trouble"),
         ):
-            calibrate(
-                index,
-                impact,
-                payout=PAYOUT,
-                objective=ExpectedUncovered(),
-                basis="annual",
-            )
+            calibrate(sample, payout=PAYOUT, objective=ExpectedUncovered())
 
 
 class TestScopes(unittest.TestCase):
@@ -279,19 +234,18 @@ class TestScopes(unittest.TestCase):
             (0.3, 1.0),
         )
         for seed, basis, objective, pricing, budget in cases:
-            index, impact = random_portfolio(seed)
+            sample, _ = random_portfolio(seed, basis=basis)
             common = {
                 "payout": PAYOUT,
                 "objective": objective,
-                "basis": basis,
                 "pricing": pricing,
                 "budget": budget,
             }
-            single = calibrate(index, impact, scope="individual", **common)
-            joint = calibrate(index, impact, scope="portfolio", **common)
-            mask, measure = _measure(index, single)
-            total_loss = impact.imp_mat.toarray()[mask].sum(axis=1)
-            total_paid = single.payout_matrix(index)[mask].sum(axis=1)
+            single = calibrate(sample, scope="individual", **common)
+            joint = calibrate(sample, scope="portfolio", **common)
+            measure = sample.measure.as_probability()
+            total_loss = sample.loss.toarray().sum(axis=1)
+            total_paid = single.payout_matrix(sample.index).sum(axis=1)
             on_total = objective.evaluate(total_loss, total_paid, measure)
             optimum = joint.problems[0].objective_value
             scale = max(abs(on_total), 1.0)
@@ -313,28 +267,34 @@ class TestCover(unittest.TestCase):
     """What a cover returns."""
 
     def setUp(self) -> None:
-        self.index, self.impact = random_portfolio(4)
+        self.sample, self.impact = random_portfolio(4)
         self.cover = calibrate(
-            self.index,
-            self.impact,
+            self.sample,
             payout=PAYOUT,
             objective=WeightedCVaR(alpha=0.5, beta=0.9),
-            basis="annual",
             scope="portfolio",
             budget=1.0,
         )
 
     def test_payout_impact_is_a_climada_impact(self) -> None:
-        paid = self.cover.payout_impact(self.index, self.impact)
+        index, units = self.sample.index, self.sample.units
+        paid = self.cover.payout_impact(index, self.impact, units=units)
         self.assertIsInstance(paid, Impact)
-        matrix = self.cover.payout_matrix(self.index)
+        matrix = self.cover.payout_matrix(index)
         np.testing.assert_allclose(paid.imp_mat.toarray(), matrix)
         np.testing.assert_allclose(paid.at_event, matrix.sum(axis=1))
-        np.testing.assert_allclose(paid.eai_exp, self.index.frequency @ matrix)
+        np.testing.assert_allclose(paid.eai_exp, self.impact.frequency @ matrix)
         self.assertAlmostEqual(
-            paid.aai_agg, float((self.index.frequency @ matrix).sum())
+            paid.aai_agg, float((self.impact.frequency @ matrix).sum())
         )
         np.testing.assert_array_equal(paid.event_id, self.impact.event_id)
+        _, _, others = array_index(np.zeros((1, 2)), np.zeros((1, 2)))
+        for wrong in (others, index):
+            with (
+                self.subTest(units=wrong),
+                self.assertRaisesRegex(ParametricInputError, "cover's unit_id"),
+            ):
+                self.cover.payout_impact(index, self.impact, units=wrong)
 
     def test_tables(self) -> None:
         frame = self.cover.levels_frame()
@@ -360,13 +320,16 @@ class TestCover(unittest.TestCase):
         cover = CalibrationResult(**fields)
         self.assertFalse(cover.levels.flags.writeable)
         self.assertEqual(cover.premium, 0.0)
+        self.assertIsNone(
+            CalibrationResult(**{**fields, "calibration_years": None}).calibration_years
+        )
         with self.assertRaisesRegex(ParametricInputError, "levels must have shape"):
             CalibrationResult(**{**fields, "levels": np.zeros((2, 1))})
         with self.assertRaisesRegex(ParametricInputError, "scope must be one of"):
             CalibrationResult(**{**fields, "scope": "cluster"})
 
     def test_payouts_need_the_covers_units(self) -> None:
-        other, _ = array_index(np.zeros((2, 3)), np.zeros((2, 3)), [0, 1], 10)
+        other, _, _ = array_index(np.zeros((2, 3)), np.zeros((2, 3)))
         other = ParametricIndex(
             other.values, other.event_id, ("A", "B", "C"), other.definition
         )
@@ -376,45 +339,46 @@ class TestCover(unittest.TestCase):
     def test_training_years_only(self) -> None:
         train = np.arange(20)
         cover = calibrate(
-            self.index,
-            self.impact,
-            payout=PAYOUT,
-            objective=ExpectedUncovered(),
-            basis="annual",
-            years=train,
+            self.sample.select(train), payout=PAYOUT, objective=ExpectedUncovered()
         )
         np.testing.assert_array_equal(cover.calibration_years, train)
+        on_events, _ = random_portfolio(4, basis="event")
+        cover = calibrate(on_events, payout=PAYOUT, objective=ExpectedUncovered())
+        self.assertIsNone(cover.calibration_years)
+        self.assertEqual(cover.basis, "event")
 
 
 class TestInputs(unittest.TestCase):
     """Invalid inputs raise before anything is solved."""
 
     def test_invalid_arguments_raise(self) -> None:
-        index, impact = random_portfolio(0)
-        good = {"payout": PAYOUT, "objective": ExpectedUncovered(), "basis": "annual"}
+        sample, _ = random_portfolio(0)
+        good = {"payout": PAYOUT, "objective": ExpectedUncovered()}
         bad = [
             {"scope": "cluster"},
-            {"basis": "event_conditional"},
             {"budget": -1.0},
             {"objective": "mse"},
             {"pricing": 0.1},
-            {"years": [99]},
         ]
         for change in bad:
             with self.subTest(change=change), self.assertRaises(ParametricInputError):
-                calibrate(index, impact, **{**good, **change})
+                calibrate(sample, **{**good, **change})
 
-    def test_index_and_payout_types_are_checked(self) -> None:
-        index, impact = random_portfolio(0)
-        good = {"payout": PAYOUT, "objective": ExpectedUncovered(), "basis": "annual"}
-        with self.assertRaisesRegex(ParametricInputError, "ParametricIndex"):
-            calibrate(index.values, impact, **good)
+    def test_sample_and_payout_types_are_checked(self) -> None:
+        sample, _ = random_portfolio(0)
+        good = {"payout": PAYOUT, "objective": ExpectedUncovered()}
+        for wrong in (sample.index, sample.index.values):
+            with (
+                self.subTest(sample=type(wrong).__name__),
+                self.assertRaisesRegex(ParametricInputError, "OutcomeSample"),
+            ):
+                calibrate(wrong, **good)
         with self.assertRaisesRegex(ParametricInputError, "StepPayout"):
-            calibrate(index, impact, **{**good, "payout": (20.0, 70.0, 4)})
+            calibrate(sample, **{**good, "payout": (20.0, 70.0, 4)})
 
     def test_a_payout_the_solver_cannot_take_is_refused(self) -> None:
-        index, impact = random_portfolio(0)
-        good = {"objective": ExpectedUncovered(), "basis": "annual"}
+        sample, _ = random_portfolio(0)
+        good = {"objective": ExpectedUncovered()}
         bad = {
             "lower tail": StepPayout.uniform(70.0, 20.0, 4, tail="lower"),
             "not monotone": StepPayout.uniform(20.0, 70.0, 4, monotone=False),
@@ -431,57 +395,50 @@ class TestInputs(unittest.TestCase):
                 self.subTest(name=name),
                 self.assertRaisesRegex(ParametricInputError, "Free()"),
             ):
-                calibrate(index, impact, payout=payout, **good)
+                calibrate(sample, payout=payout, **good)
 
-    def test_an_impact_that_does_not_match_the_index_is_refused(self) -> None:
-        index, impact = array_index([[30.0], [60.0]], [[4.0], [10.0]], [0, 1], 10)
-        np.testing.assert_array_equal(loss_matrix(index, impact), [[4.0], [10.0]])
-        changes = {
-            "event_id": ({"event_id": np.array([1, 3])}, "event_id"),
-            "frequency": ({"frequency": np.array([0.1, 0.2])}, "frequencies"),
-            "coord_exp": ({"coord_exp": np.array([[25.0, -70.0]])}, "coord_exp"),
-            "loss": ({"imp_mat": sp.csr_matrix([[4.0], [-1.0]])}, "negative"),
-        }
-        for name, (change, match) in changes.items():
-            other = copy.deepcopy(impact)
-            for attribute, value in change.items():
-                setattr(other, attribute, value)
-            with (
-                self.subTest(name=name),
-                self.assertRaisesRegex(ParametricInputError, match),
-            ):
-                loss_matrix(index, other)
+    def test_a_payout_that_pays_at_zero_on_left_out_events_is_refused(self) -> None:
+        # The third event has no loss and an index of 0: the sample leaves it out.
+        sample, _ = array_sample(
+            [[30.0], [60.0], [0.0]], [[4.0], [10.0], [0.0]], [0, 1, 2], 10
+        )
+        self.assertEqual(sample.n_left_out, 1)
+        good = {"objective": ExpectedUncovered(), "budget": 0.5}
+        at_zero = StepPayout.uniform(0.0, 70.0, 2)
+        with self.assertRaisesRegex(ParametricInputError, "left out 1 events"):
+            calibrate(sample, payout=at_zero, **good)
+        # A payout with nothing at an index of 0 goes ahead.
+        cover = calibrate(sample, payout=StepPayout.uniform(20.0, 70.0, 2), **good)
+        self.assertAlmostEqual(cover.problems[0].objective_value, 0.7, places=9)
+        # So does one at 0 on a sample that left nothing out.
+        calibrate(_hand_example(), payout=at_zero, **good)
 
     def test_years_without_events_raise(self) -> None:
-        index, impact = array_index([[30.0]], [[1.0]], [0], 10)
+        sample, _ = array_sample([[30.0]], [[1.0]], [0], 10)
         with self.assertRaisesRegex(ParametricInputError, "no event"):
-            calibrate(
-                index,
-                impact,
-                payout=PAYOUT,
-                objective=ExpectedUncovered(),
-                basis="annual",
-                years=[5, 6],
-            )
+            sample.select([5, 6])
+
+    def test_frequencies_above_one_per_year_on_the_event_basis_raise(self) -> None:
+        # The event basis holds them; the calibration reads it as a
+        # probability over one year, which needs at most 1.
+        index, impact, units = array_index(
+            [[30.0], [60.0]], [[4.0], [10.0]], frequency=[0.8, 0.7]
+        )
+        sample = OutcomeSample.from_impact(
+            index, impact, units=units, basis=EventBasis()
+        )
+        self.assertAlmostEqual(sample.measure.total_weight, 1.5)
+        with self.assertRaisesRegex(ParametricInputError, "sum to 1.5 per year"):
+            calibrate(sample, payout=PAYOUT, objective=ExpectedUncovered())
 
     def test_mean_squared_error_without_cvxpy_raises(self) -> None:
-        index, impact = random_portfolio(0)
+        sample, _ = random_portfolio(0)
         with mock.patch.dict("sys.modules", {"cvxpy": None}):
             with self.assertRaisesRegex(MissingDependencyError, "cvxpy"):
-                calibrate(
-                    index,
-                    impact,
-                    payout=PAYOUT,
-                    objective=MeanSquaredError(),
-                    basis="annual",
-                )
+                calibrate(sample, payout=PAYOUT, objective=MeanSquaredError())
             # The linear objectives need no cvxpy.
             calibrate(
-                index,
-                impact,
-                payout=PAYOUT,
-                objective=WeightedCVaR(alpha=0.9, beta=0.9),
-                basis="annual",
+                sample, payout=PAYOUT, objective=WeightedCVaR(alpha=0.9, beta=0.9)
             )
 
 

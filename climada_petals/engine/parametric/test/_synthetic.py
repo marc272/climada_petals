@@ -33,8 +33,11 @@ from climada.hazard import Centroids, Hazard, TCTracks, TropCyclone
 from numpy.typing import ArrayLike
 
 from climada_petals.engine.parametric import (
+    CatalogueYears,
+    EventBasis,
     IndexDefinition,
     InsuredUnits,
+    OutcomeSample,
     ParametricIndex,
 )
 
@@ -166,30 +169,23 @@ def catalogue_tracks(storms: Sequence[tuple[int, int, float, float]]) -> TCTrack
 def array_index(
     values: ArrayLike,
     loss: ArrayLike,
-    event_year: ArrayLike,
-    n_years: int,
     *,
-    frequency: ArrayLike | None = None,
+    frequency: ArrayLike | float = 0.1,
     definition: IndexDefinition = TABLE_WIND,
-) -> tuple[ParametricIndex, Impact]:
-    """Return an index and an ``Impact`` built from arrays.
+) -> tuple[ParametricIndex, Impact, InsuredUnits]:
+    """Return an index, an ``Impact`` and the insured units, built from arrays.
 
-    Every event has frequency ``1 / n_years`` unless given; the years are
-    ``0 .. n_years - 1``; the units are one exposure point each, of value 1,
-    named ``U0, U1, ...``.
+    The events are ``1, 2, ...`` with the given frequencies; the units are
+    one exposure point each, of value 1, named ``U0, U1, ...``.
     """
     index_values = np.asarray(values, dtype=float)
-    n_units = index_values.shape[1]
+    n_events, n_units = index_values.shape
     points = np.column_stack(
         [np.full(n_units, 25.0), np.linspace(-81.0, -80.0, n_units)]
     )
     impact = _array_impact(
         np.asarray(loss, dtype=float),
-        (
-            np.full(index_values.shape[0], 1.0 / n_years)
-            if frequency is None
-            else np.asarray(frequency, dtype=float)
-        ),
+        np.broadcast_to(np.asarray(frequency, dtype=float), (n_events,)).copy(),
         points,
     )
     exp = Exposures(lat=points[:, 0], lon=points[:, 1], value=np.ones(n_units))
@@ -201,14 +197,34 @@ def array_index(
         units.unit_id,
         definition,
         event_name=impact.event_name,
-        units=units,
     )
-    return (
-        index.with_years(
-            impact, event_year=np.asarray(event_year), years=np.arange(n_years)
-        ),
-        impact,
+    return index, impact, units
+
+
+def array_sample(
+    values: ArrayLike,
+    loss: ArrayLike,
+    event_year: ArrayLike,
+    n_years: int,
+    *,
+    basis: str = "annual",
+    definition: IndexDefinition = TABLE_WIND,
+) -> tuple[OutcomeSample, Impact]:
+    """Return a sample of :func:`array_index`'s objects, and the ``Impact``.
+
+    Every event has frequency ``1 / n_years``. ``basis="annual"`` takes
+    catalogue years ``0 .. n_years - 1`` with the given year of each event;
+    ``basis="event"`` the event basis.
+    """
+    index, impact, units = array_index(
+        values, loss, frequency=1.0 / n_years, definition=definition
     )
+    outcomes = (
+        EventBasis()
+        if basis == "event"
+        else CatalogueYears.from_labels(impact.event_id, event_year, n_years=n_years)
+    )
+    return OutcomeSample.from_impact(index, impact, units=units, basis=outcomes), impact
 
 
 def _array_impact(
@@ -231,12 +247,18 @@ def _array_impact(
 
 
 def random_portfolio(
-    seed: int, *, n_events: int = 40, n_units: int = 3, n_years: int = 60
-) -> tuple[ParametricIndex, Impact]:
-    """Return a random index and impact: several events in some years, none in others.
+    seed: int,
+    *,
+    n_events: int = 40,
+    n_units: int = 3,
+    n_years: int = 60,
+    basis: str = "annual",
+) -> tuple[OutcomeSample, Impact]:
+    """Return a random sample and its impact: several events in some years, none in others.
 
     Losses grow with the index above 25 (as a wind damage function would)
-    with noise, so that index and loss are related but not one-to-one.
+    with noise, so that index and loss are related but not one-to-one. The
+    basis is that of :func:`array_sample`.
     """
     rng = np.random.default_rng(seed)
     values = rng.uniform(0.0, 80.0, size=(n_events, n_units))
@@ -244,7 +266,7 @@ def random_portfolio(
     loss = np.where(values > 25.0, (values - 25.0) ** 2 * noise, 0.0)
     loss[rng.random((n_events, n_units)) < 0.15] = 0.0
     years = np.sort(rng.integers(0, n_years, size=n_events))
-    return array_index(values, loss, years, n_years)
+    return array_sample(values, loss, years, n_years, basis=basis)
 
 
 #: Six points near the four centroids of :func:`grid_hazard`: latitude,

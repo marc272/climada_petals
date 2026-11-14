@@ -16,9 +16,8 @@ with CLIMADA. If not, see <https://www.gnu.org/licenses/>.
 
 ---
 
-Tests of the index builders, the event matching, the CLIMADA specifics and
-the simulation years, on small synthetic CLIMADA objects of three hazard
-types: tropical cyclones
+Tests of the index builders, the event matching and the CLIMADA specifics,
+on small synthetic CLIMADA objects of three hazard types: tropical cyclones
 (``TC``, from the tracks of
 :func:`~climada_petals.engine.parametric.test._synthetic.three_tracks`), a
 flood (``FL``) and a drought index (``DR``, lower tail) on the grid of
@@ -28,16 +27,10 @@ On the grid, region 1 holds the points of values 1 and 3 at centroid 0 and
 the point of value 2 at centroid 1; region 2 the points of value 4 at
 centroids 2 and 3. The flood depths of the events 30, 10 and 20 at the four
 centroids are (0, 2, 1, 0), (1, 3, 0, 0) and (0.5, 0, 4, 2).
-
-The simulation-year tests use a 10,000-year catalogue in the IRIS layout
-(:data:`STORMS`): storms named ``NA_<year>_<number>`` in years 0 to 9,999,
-frequency 1 / 10,000, and dates that carry year ``y`` as 1 January of
-``y + 1``, so that no date holds year 9,999.
 """
 
 from __future__ import annotations
 
-import datetime as dt
 import unittest
 from typing import Any
 from unittest import mock
@@ -48,27 +41,26 @@ import scipy.sparse as sp
 from climada.hazard import Hazard, TCTracks
 
 from climada_petals.engine.parametric import (
+    CatalogueYears,
     CoverDefinitionError,
     EventAlignmentError,
+    EventBasis,
     ExpectedUncovered,
     ImpactInputError,
     IndexDefinition,
     InsuredUnits,
+    OutcomeSample,
     ParametricIndex,
     ParametricInputError,
     StepPayout,
     UnitMappingError,
-    basis_risk,
     calibrate,
 )
 from climada_petals.engine.parametric import index as index_module
-from climada_petals.engine.parametric import split_years
-from climada_petals.engine.parametric.calibrate import loss_matrix
 from climada_petals.engine.parametric.test._synthetic import (
     FLOOD_DEPTH,
     POINTS,
     array_index,
-    catalogue_tracks,
     exposures,
     grid_exposures,
     grid_hazard,
@@ -100,10 +92,10 @@ def _regions(exp: Any = None) -> InsuredUnits:
         )
 
 
-def _dated(hazard: Any, exp: Any, **years: Any) -> ParametricIndex:
-    """Return the intensity at each point, with years from ``hazard``."""
-    index = ParametricIndex.from_hazard(hazard, InsuredUnits.points(exp))
-    return index.with_years(hazard, **years)
+def _loss(index: ParametricIndex, impact: Any, units: InsuredUnits) -> np.ndarray:
+    """Return the loss per event and unit of an event-basis sample."""
+    sample = OutcomeSample.from_impact(index, impact, units=units, basis=EventBasis())
+    return sample.loss.toarray()
 
 
 class TestFromClimada(unittest.TestCase):
@@ -116,7 +108,7 @@ class TestFromClimada(unittest.TestCase):
 
     def test_centroid_intensity(self) -> None:
         units = InsuredUnits.points(self.exposures)
-        index = ParametricIndex.from_hazard(self.hazard, units).with_years(self.hazard)
+        index = ParametricIndex.from_hazard(self.hazard, units)
         np.testing.assert_array_equal(index.values, self.hazard.intensity.toarray())
         self.assertEqual(
             index.definition,
@@ -129,19 +121,11 @@ class TestFromClimada(unittest.TestCase):
         )
         self.assertEqual(index.event_name, ("A", "B", "C"))
         np.testing.assert_array_equal(index.event_id, self.hazard.event_id)
-        self.assertIs(index.units, units)
         self.assertNotIn("centr_TC", self.exposures.gdf.columns)
-        # Three years, 2001 to 2003, from the dates and frequency 1 / 3.
-        np.testing.assert_array_equal(index.years, [2001, 2002, 2003])
-        np.testing.assert_array_equal(index.event_year, [2001, 2003, 2003])
+        # Storm C passes far away: no wind and no loss, so the sample leaves it out.
         np.testing.assert_array_equal(
-            loss_matrix(index, self.impact), self.impact.imp_mat.toarray()
+            _loss(index, self.impact, units), self.impact.imp_mat.toarray()[:2]
         )
-
-    def test_years_can_be_given(self) -> None:
-        index = _dated(self.hazard, self.exposures, years=range(2000, 2005))
-        np.testing.assert_array_equal(index.years, np.arange(2000, 2005))
-        np.testing.assert_array_equal(index.event_year, [2001, 2003, 2003])
 
     def test_an_exposure_point_without_a_centroid_raises(self) -> None:
         far = exposures([*POINTS, (0.0, 0.0, 1.0e9)])
@@ -164,10 +148,11 @@ class TestFromClimada(unittest.TestCase):
             ParametricIndex.from_hazard(empty, InsuredUnits.points(self.exposures))
 
     def test_an_impact_of_other_events_is_refused(self) -> None:
-        index = _dated(self.hazard, self.exposures)
+        units = InsuredUnits.points(self.exposures)
+        index = ParametricIndex.from_hazard(self.hazard, units)
         _, other = hazard_and_impact(TCTracks(self.tracks.data[:2]), self.exposures)
-        with self.assertRaises(ParametricInputError):
-            loss_matrix(index, other)
+        with self.assertRaises(EventAlignmentError):
+            _loss(index, other, units)
         no_matrix = self.impact.__class__(
             event_id=self.impact.event_id,
             event_name=self.impact.event_name,
@@ -177,196 +162,8 @@ class TestFromClimada(unittest.TestCase):
             eai_exp=self.impact.eai_exp,
             at_event=self.impact.at_event,
         )
-        with self.assertRaisesRegex(ParametricInputError, "save_mat"):
-            loss_matrix(index, no_matrix)
-
-
-#: A 10,000-year catalogue with storms in its first and last year.
-N_CATALOGUE = 10_000
-STORMS: tuple[tuple[int, int, float, float], ...] = (
-    (0, 0, 25.75, 120.5),
-    (2500, 0, 25.8, 100.0),
-    (5000, 0, 25.9, 110.0),
-    (6999, 0, 25.76, 90.0),
-    (7000, 0, 25.8, 115.0),
-    (9999, 0, 25.85, 120.0),
-    (9999, 1, 26.0, 95.0),
-)
-
-
-def _year_dates(years: list[int]) -> list[int]:
-    """Date year ``y`` on 1 January of ``y + 1``; 0 (no date) above 9998.
-
-    A date holds the calendar years 1 to 9999, so a hazard dated this way
-    cannot date the last year of a 10,000-year catalogue.
-    """
-    return [dt.date(y + 1, 1, 1).toordinal() if y < dt.MAXYEAR else 0 for y in years]
-
-
-class TestSimulationYears(unittest.TestCase):
-    """Years from the dates, the event names, or n_years and first_year."""
-
-    def setUp(self) -> None:
-        self.exposures = exposures()
-        self.tracks = catalogue_tracks(STORMS)
-        self.years = [year for year, *_ in STORMS]
-        self.hazard, self.impact = hazard_and_impact(
-            self.tracks,
-            self.exposures,
-            frequency=1 / N_CATALOGUE,
-            date=_year_dates(self.years),
-        )
-
-    def test_a_10000_year_catalogue_calibrates_from_its_event_names(self) -> None:
-        # The last year has no date, so the default route refuses the hazard.
-        with self.assertRaisesRegex(ParametricInputError, "pass event_year"):
-            _dated(self.hazard, self.exposures)
-        index = _dated(self.hazard, self.exposures, event_year="event_name")
-        np.testing.assert_array_equal(index.event_year, self.years)
-        np.testing.assert_array_equal(index.years, np.arange(N_CATALOGUE))
-        stated = _dated(
-            self.hazard,
-            self.exposures,
-            event_year="event_name",
-            n_years=N_CATALOGUE,
-            first_year=0,
-        )
-        np.testing.assert_array_equal(stated.years, index.years)
-        circle = ParametricIndex.from_cat_in_circle(
-            self.tracks,
-            InsuredUnits.points(self.exposures),
-            hazard=self.hazard,
-            radius_km=50.0,
-        ).with_years(self.hazard, event_year="event_name", first_year=0)
-        np.testing.assert_array_equal(circle.event_year, self.years)
-        np.testing.assert_array_equal(circle.years, index.years)
-        train, test = split_years(index, train_fraction=0.7)
-        np.testing.assert_array_equal(train, np.arange(7000))
-        np.testing.assert_array_equal(test, np.arange(7000, N_CATALOGUE))
-        np.testing.assert_array_equal(index.event_mask(test), [False] * 4 + [True] * 3)
-        payout = StepPayout.uniform(attachment=20, exhaustion=70, n_steps=5)
-        for scope in ("individual", "portfolio"):
-            cover = calibrate(
-                index,
-                self.impact,
-                payout=payout,
-                objective=ExpectedUncovered(),
-                basis="annual",
-                scope=scope,
-                budget=1.0,
-                years=train,
-            )
-            with self.subTest(scope=scope):
-                np.testing.assert_array_equal(cover.calibration_years, train)
-                self.assertGreater(cover.premium, 0.0)
-                metrics = basis_risk(index, self.impact, cover, beta=0.99, years=test)
-                self.assertEqual(len(metrics), self.exposures.gdf.shape[0] + 1)
-
-    def test_the_span_is_stated_not_taken_from_the_first_event(self) -> None:
-        storms = [s for s in STORMS if s[0] != 0]  # no storm in year 0
-        tracks = catalogue_tracks(storms)
-        hazard, _ = hazard_and_impact(tracks, self.exposures, frequency=1 / N_CATALOGUE)
-        # The years 2500-9999 are 7,500 of 10,000: where the rest lie is unknown.
-        with self.assertRaisesRegex(ParametricInputError, "Pass first_year"):
-            _dated(hazard, self.exposures, event_year="event_name")
-        index = _dated(hazard, self.exposures, event_year="event_name", first_year=0)
-        np.testing.assert_array_equal(index.years, np.arange(N_CATALOGUE))
-        train, _ = split_years(index, train_fraction=0.7)
-        np.testing.assert_array_equal(train, np.arange(7000))
-        # Every track starts on one date: the dates give one year, not 10,000.
-        # The date route keeps its earlier result, but no longer silently.
-        with self.assertLogs(LOGGER, "WARNING") as logs:
-            dated = _dated(hazard, self.exposures)
-        self.assertIn("run from 2000 to 2000", logs.output[0])
-        self.assertIn("pass first_year", logs.output[0])
-        np.testing.assert_array_equal(dated.years, np.arange(2000, 12_000))
-
-    def test_valid_dates_with_years_missing_keep_the_earlier_result(self) -> None:
-        # A hazard with storms in years 0 to 9,997, all
-        # dated (year y on 1 January of y + 1), 9,998 of 10,000 years.
-        storms = [s for s in STORMS if s[0] != 9999]
-        years = [year for year, *_ in storms]
-        hazard, _ = hazard_and_impact(
-            catalogue_tracks(storms),
-            self.exposures,
-            frequency=1 / N_CATALOGUE,
-            date=_year_dates(years),
-        )
-        with self.assertLogs(LOGGER, "WARNING") as logs:
-            dated = _dated(hazard, self.exposures)
-        self.assertIn("could lie before 1 or after 7001", logs.output[0])
-        np.testing.assert_array_equal(dated.event_year, np.add(years, 1))
-        np.testing.assert_array_equal(dated.years, np.arange(1, N_CATALOGUE + 1))
-        stated = _dated(hazard, self.exposures, first_year=1)
-        np.testing.assert_array_equal(stated.years, dated.years)
-        with self.assertRaisesRegex(ParametricInputError, "Pass first_year"):
-            _dated(hazard, self.exposures, event_year="event_name")
-        named = _dated(hazard, self.exposures, event_year="event_name", first_year=0)
-        np.testing.assert_array_equal(named.years, np.arange(N_CATALOGUE))
-
-    def test_the_date_route_is_the_default(self) -> None:
-        tracks = three_tracks()
-        hazard, _ = hazard_and_impact(tracks, self.exposures)
-        default = _dated(hazard, self.exposures)
-        dated = _dated(hazard, self.exposures, event_year="date")
-        np.testing.assert_array_equal(dated.event_year, [2001, 2003, 2003])
-        np.testing.assert_array_equal(dated.years, default.years)
-        stated = _dated(hazard, self.exposures, n_years=5, first_year=2000)
-        np.testing.assert_array_equal(stated.years, np.arange(2000, 2005))
-
-    def test_n_years_and_first_year_with_explicit_event_years(self) -> None:
-        # An ensemble of two members per storm of a 3-year catalogue: member
-        # m of year y has the year y + 3 m.
-        hazard, _ = hazard_and_impact(three_tracks(), self.exposures)
-        index = _dated(
-            hazard, self.exposures, event_year=[0, 2, 5], n_years=6, first_year=0
-        )
-        np.testing.assert_array_equal(index.years, np.arange(6))
-        np.testing.assert_array_equal(index.event_year, [0, 2, 5])
-        # n_years does not need the frequencies to agree on N.
-        hazard.frequency = np.array([0.1, 0.2, 0.3])
-        index = _dated(
-            hazard, self.exposures, event_year=[0, 2, 5], n_years=6, first_year=0
-        )
-        np.testing.assert_array_equal(index.years, np.arange(6))
-
-    def test_ambiguous_or_invalid_years_raise(self) -> None:
-        hazard, exp = self.hazard, self.exposures
-        cases: list[tuple[dict[str, Any], str]] = [
-            ({"years": np.arange(N_CATALOGUE), "n_years": N_CATALOGUE}, "not both"),
-            ({"years": np.arange(N_CATALOGUE), "first_year": 0}, "not both"),
-            ({"event_year": "calendar"}, "'date', 'event_name'"),
-            ({"event_year": "event_name", "n_years": 0}, "n_years must be >= 1"),
-            ({"event_year": "event_name", "n_years": 2.5}, "n_years must be an int"),
-            ({"event_year": "event_name", "n_years": True}, "n_years must be an int"),
-            ({"event_year": "event_name", "first_year": "0"}, "first_year must be"),
-            ({"event_year": "event_name", "first_year": 1}, "outside the 10000"),
-            ({"event_year": "event_name", "n_years": 5000}, "more than the 5000"),
-        ]
-        for kwargs, match in cases:
-            with (
-                self.subTest(kwargs=kwargs),
-                self.assertRaisesRegex(ParametricInputError, match),
-            ):
-                _dated(hazard, exp, **kwargs)
-        uneven = hazard.select(event_names=list(hazard.event_name))
-        uneven.frequency = np.linspace(1e-4, 2e-4, uneven.size)
-        with self.assertRaisesRegex(ParametricInputError, "pass n_years or years"):
-            _dated(uneven, exp, event_year="event_name")
-
-    def test_event_names_without_a_year_raise(self) -> None:
-        for names in (["A", "B", "C"], ["NA_5_0_gen1", "NA_5_0", "NA_x_0"]):
-            tracks = catalogue_tracks(STORMS[:3])
-            for track, name in zip(tracks.data, names, strict=True):
-                track.attrs["sid"] = track.attrs["name"] = name
-            hazard, _ = hazard_and_impact(tracks, self.exposures)
-            with (
-                self.subTest(names=names),
-                self.assertRaisesRegex(
-                    ParametricInputError, "<prefix>_<year>_<number>"
-                ),
-            ):
-                _dated(hazard, self.exposures, event_year="event_name")
+        with self.assertRaisesRegex(ImpactInputError, "save_mat"):
+            _loss(index, no_matrix, units)
 
 
 class TestFromHazard(unittest.TestCase):
@@ -474,30 +271,31 @@ class TestEvents(unittest.TestCase):
         self.hazard = grid_hazard()
         self.index = ParametricIndex.from_hazard(
             self.hazard, self.units, index_stat="mean"
-        ).with_years(self.hazard, event_year=[0, 1, 1], years=range(10))
+        )
+        self.years = CatalogueYears.from_labels([30, 10, 20], [0, 1, 1], n_years=10)
+
+    def _sample(self, impact: Any) -> OutcomeSample:
+        return OutcomeSample.from_impact(
+            self.index, impact, units=self.units, basis=self.years
+        )
 
     def test_a_shuffled_impact_is_read_in_the_index_order(self) -> None:
         impact = grid_impact(self.hazard, self.exposures)
         reordered = grid_impact(shuffled(self.hazard, [2, 0, 1]), self.exposures)
         np.testing.assert_array_equal(reordered.event_id, [20, 30, 10])
         expected = [[0.8, 0.8], [2.0, 0.0], [0.4, 4.8]]
-        np.testing.assert_allclose(loss_matrix(self.index, impact), expected)
-        np.testing.assert_allclose(loss_matrix(self.index, reordered), expected)
+        samples = [self._sample(loss) for loss in (impact, reordered)]
+        for sample in samples:
+            np.testing.assert_allclose(sample.loss.toarray(), expected)
+            np.testing.assert_array_equal(sample.event_id, [30, 10, 20])
         np.testing.assert_array_equal(self.index.rows_in(reordered), [1, 2, 0])
         payout = StepPayout.uniform(attachment=0.5, exhaustion=2.5, n_steps=2)
         covers = [
-            calibrate(
-                self.index,
-                loss,
-                payout=payout,
-                objective=ExpectedUncovered(),
-                basis="annual",
-                budget=0.5,
-            )
-            for loss in (impact, reordered)
+            calibrate(sample, payout=payout, objective=ExpectedUncovered(), budget=0.5)
+            for sample in samples
         ]
         np.testing.assert_allclose(covers[0].levels, covers[1].levels, atol=1e-12)
-        paid = covers[0].payout_impact(self.index, reordered)
+        paid = covers[0].payout_impact(self.index, reordered, units=self.units)
         np.testing.assert_array_equal(paid.event_id, reordered.event_id)
         unit_paid = covers[0].payout_matrix(self.index)[[2, 0, 1]]
         points = paid.imp_mat.toarray()
@@ -514,7 +312,7 @@ class TestEvents(unittest.TestCase):
             self.exposures,
         )
         with self.assertRaisesRegex(EventAlignmentError, "matched_to"):
-            loss_matrix(self.index, fewer)
+            self._sample(fewer)
         twice = grid_impact(grid_hazard(event_id=[30, 10, 30]), self.exposures)
         with self.assertRaisesRegex(EventAlignmentError, "repeat"):
             self.index.rows_in(twice)
@@ -545,13 +343,9 @@ class TestEvents(unittest.TestCase):
         np.testing.assert_array_equal(
             matched.values, [[0.0, 1.0], [1.0, 0.0], [0.5, 4.0]]
         )
-        self.assertIs(matched.units, self.units)
         self.assertEqual(matched.definition, other.definition)
-        with self.assertRaisesRegex(ParametricInputError, "no simulation years"):
-            loss_matrix(matched, impact)
-        dated = matched.with_years(impact, event_year=[0, 1, 2], years=range(3))
         np.testing.assert_allclose(
-            loss_matrix(dated, impact), [[0.8, 0.8], [2.0, 0.0], [0.4, 4.8]]
+            _loss(matched, impact, self.units), [[0.8, 0.8], [2.0, 0.0], [0.4, 4.8]]
         )
 
     def test_invalid_matching_raises(self) -> None:
@@ -572,9 +366,11 @@ class TestEvents(unittest.TestCase):
         )
         with self.assertRaisesRegex(EventAlignmentError, "repeat"):
             named_twice.matched_to(impact, on="event_name")
-        dated = nameless.with_years(impact, event_year=[0, 1, 1], years=range(10))
-        with self.assertRaisesRegex(ParametricInputError, "no InsuredUnits"):
-            loss_matrix(dated, impact)
+        swapped = ParametricIndex(
+            self.index.values, self.index.event_id, (2, 1), self.index.definition
+        )
+        with self.assertRaisesRegex(ParametricInputError, "index's unit_id, in order"):
+            _loss(swapped, impact, self.units)
 
 
 class TestFromTable(unittest.TestCase):
@@ -706,112 +502,22 @@ class TestFromDefinition(unittest.TestCase):
             ParametricIndex.from_definition(stated, hazard, units)
 
 
-class TestWithYears(unittest.TestCase):
-    """with_years, the transitional source of the annual basis's years."""
-
-    def setUp(self) -> None:
-        self.exposures = grid_exposures()
-        self.units = _regions(self.exposures)
-        self.hazard = grid_hazard()
-        self.index = ParametricIndex.from_hazard(
-            self.hazard, self.units, index_stat="max"
-        )
-
-    def test_years_come_from_the_hazard_or_the_impact(self) -> None:
-        with self.assertRaisesRegex(ParametricInputError, "no simulation years"):
-            _ = self.index.event_year
-        dated = self.index.with_years(self.hazard)
-        np.testing.assert_array_equal(dated.years, np.arange(2001, 2011))
-        np.testing.assert_array_equal(dated.event_year, [2001, 2002, 2003])
-        np.testing.assert_array_equal(dated.frequency, [0.1, 0.1, 0.1])
-        reordered = grid_impact(shuffled(self.hazard, [1, 2, 0]), self.exposures)
-        from_impact = self.index.with_years(reordered, event_year=[5, 9, 0], n_years=10)
-        # The years follow the index's events, matched on event_id.
-        np.testing.assert_array_equal(from_impact.event_year, [0, 5, 9])
-        np.testing.assert_array_equal(from_impact.years, np.arange(10))
-        self.assertFalse(dated.years.flags.writeable)
-
-    def test_invalid_sources_raise(self) -> None:
-        per_day = grid_hazard()
-        per_day.frequency_unit = "1/day"
-        with self.assertRaisesRegex(ImpactInputError, "frequency_unit"):
-            self.index.with_years(per_day)
-        fewer = grid_hazard(FLOOD_DEPTH[:2], event_id=[30, 10], event_name=["a", "b"])
-        with self.assertRaisesRegex(EventAlignmentError, "not in the source"):
-            self.index.with_years(fewer)
-        cases: list[tuple[dict[str, Any], str]] = [
-            ({"event_year": [0, 1]}, "event_year has 2 entries for 3 events"),
-            ({"event_year": [0, 1, 2], "years": [0, 1]}, "event years outside"),
-            ({"event_year": [0, 1, 1], "years": [0, 1, 1]}, "non-empty and unique"),
-        ]
-        for kwargs, match in cases:
-            with (
-                self.subTest(kwargs=kwargs),
-                self.assertRaisesRegex(ParametricInputError, match),
-            ):
-                self.index.with_years(self.hazard, **kwargs)
-        empty = grid_hazard(np.zeros((0, 4)), event_id=[], event_name=[])
-        with self.assertRaisesRegex(ParametricInputError, "has no events"):
-            self.index.with_years(empty)
-        never = grid_hazard()
-        never.frequency = np.array([0.1, 0.0, 0.1])
-        with self.assertRaisesRegex(ParametricInputError, "frequency must be > 0"):
-            self.index.with_years(never, event_year=[0, 1, 2], years=range(10))
-
-    def test_calibration_needs_the_years(self) -> None:
-        impact = grid_impact(self.hazard, self.exposures)
-        payout = StepPayout.uniform(attachment=0.5, exhaustion=2.5, n_steps=2)
-        arguments: dict[str, Any] = {
-            "payout": payout,
-            "objective": ExpectedUncovered(),
-            "basis": "annual",
-        }
-        with self.assertRaisesRegex(ParametricInputError, "with_years"):
-            calibrate(self.index, impact, **arguments)
-        dated = self.index.with_years(self.hazard)
-        for scope in ("individual", "portfolio"):
-            cover = calibrate(dated, impact, scope=scope, budget=1.0, **arguments)
-            table = basis_risk(dated, impact, cover, beta=0.9)
-            with self.subTest(scope=scope):
-                self.assertEqual(table["subject"].tolist(), [1, 2, "portfolio"])
-                np.testing.assert_allclose(
-                    table["expected_loss"].iloc[:2], [0.32, 0.56], rtol=1e-12
-                )
-
-
 class TestParametricIndex(unittest.TestCase):
-    """Validation and year splits."""
-
-    def test_split_years_is_two_contiguous_blocks(self) -> None:
-        index, _ = array_index(np.zeros((3, 1)), np.zeros((3, 1)), [0, 4, 9], 10)
-        train, test = split_years(index, train_fraction=0.7)
-        np.testing.assert_array_equal(train, np.arange(7))
-        np.testing.assert_array_equal(test, [7, 8, 9])
-        np.testing.assert_array_equal(index.event_mask(test), [False, False, True])
-        with self.assertRaises(ParametricInputError):
-            split_years(index, train_fraction=0.01)
+    """Validation."""
 
     def test_invalid_arrays_raise(self) -> None:
-        with self.assertRaisesRegex(ParametricInputError, "event years outside"):
-            array_index(np.zeros((2, 1)), np.zeros((2, 1)), [0, 10], 10)
         with self.assertRaisesRegex(ParametricInputError, "finite"):
-            array_index(np.full((2, 1), np.nan), np.zeros((2, 1)), [0, 1], 10)
-        index, _ = array_index(np.zeros((2, 1)), np.zeros((2, 1)), [0, 1], 10)
-        with self.assertRaises(ParametricInputError):
-            index.check_years([3, 3])
-        with self.assertRaises(ParametricInputError):
-            index.check_years([42])
+            array_index(np.full((2, 1), np.nan), np.zeros((2, 1)))
 
     def test_inconsistent_fields_raise(self) -> None:
         definition = IndexDefinition("table", unit="m")
-        units = _regions()
         good: dict[str, Any] = {
             "values": np.zeros((2, 2)),
             "event_id": [1, 2],
             "unit_id": (1, 2),
             "definition": definition,
         }
-        index = ParametricIndex(**good, event_name=["a", "b"], units=units)
+        index = ParametricIndex(**good, event_name=["a", "b"])
         self.assertEqual((index.n_events, index.n_units), (2, 2))
         self.assertFalse(index.values.flags.writeable)
         bad: list[tuple[dict[str, Any], str]] = [
@@ -821,8 +527,6 @@ class TestParametricIndex(unittest.TestCase):
             ({"unit_id": (1, 1)}, "unique ids"),
             ({"definition": "wind"}, "IndexDefinition"),
             ({"event_name": ["a"]}, "event_name has 1 entries"),
-            ({"units": grid_exposures()}, "InsuredUnits"),
-            ({"unit_id": (2, 1), "units": units}, "in order"),
         ]
         for change, match in bad:
             with (

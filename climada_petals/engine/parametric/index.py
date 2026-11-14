@@ -55,30 +55,25 @@ CLIMADA specifics, each handled by a typed error or an explicit argument:
   :class:`~climada_petals.engine.parametric.errors.UnitMappingError`.
   Build the centroids from unique coordinates.
 
-Simulation years (transitional)
--------------------------------
-Until the outcomes hold them, an index carries the simulation years of the
-annual basis and its events' frequencies, once
-:meth:`ParametricIndex.with_years` has attached them from the hazard or the
-impact. :func:`split_years` splits them into training and test years.
+An index holds no years and no frequencies: what an outcome is, an event or
+a year, is the basis of an
+:class:`~climada_petals.engine.parametric.sample.OutcomeSample`, which
+joins the index to an ``Impact``.
 """
 
 from __future__ import annotations
 
-import copy
-import math
 from collections.abc import Hashable, Mapping, Sequence
 from dataclasses import dataclass, field
 from typing import Any, Final
 
 import numpy as np
 import pandas as pd
-from numpy.typing import ArrayLike, NDArray
+from numpy.typing import NDArray
 
 from climada_petals.util.config import LOGGER
 
 from ._checks import check_real, finite_array, integer_array, read_only
-from ._years import SimulationYears, YearSource, simulation_years
 from .cover import IndexDefinition
 from .errors import EventAlignmentError, ParametricInputError, UnitMappingError
 from .index_tracks import (
@@ -91,7 +86,7 @@ from .index_tracks import (
 )
 from .units import InsuredUnits
 
-__all__ = ["HAZARD", "TABLE", "ParametricIndex", "YearSource", "split_years"]
+__all__ = ["HAZARD", "TABLE", "ParametricIndex"]
 
 HAZARD: Final[str] = "hazard"
 """The ``kind`` of an :class:`IndexDefinition` built by ``from_hazard``."""
@@ -126,9 +121,6 @@ class ParametricIndex:
         is the cover's definition.
     event_name : sequence of str, optional
         One name per event, for :meth:`matched_to` with ``on="event_name"``.
-    units : InsuredUnits, optional
-        The units the index was built on, with ``unit_id`` as their ids. An
-        ``Impact``'s loss is summed into them where the index meets it.
 
     Raises
     ------
@@ -141,8 +133,6 @@ class ParametricIndex:
     unit_id: Sequence[Hashable]
     definition: IndexDefinition
     event_name: Sequence[str] | None = field(default=None, kw_only=True)
-    units: InsuredUnits | None = field(default=None, kw_only=True)
-    _years: SimulationYears | None = field(default=None, init=False, repr=False)
 
     def __post_init__(self) -> None:
         """Validate the fields and store read-only copies."""
@@ -169,12 +159,6 @@ class ParametricIndex:
                 raise ParametricInputError(
                     f"event_name has {len(names)} entries for {n_events} events"
                 )
-        if self.units is not None and (
-            not isinstance(self.units, InsuredUnits) or self.units.unit_id != units
-        ):
-            raise ParametricInputError(
-                "units must be the InsuredUnits of the index's unit_id, in order"
-            )
         object.__setattr__(self, "values", read_only(values))
         object.__setattr__(self, "event_id", read_only(event_id))
         object.__setattr__(self, "unit_id", units)
@@ -189,83 +173,6 @@ class ParametricIndex:
     def n_units(self) -> int:
         """Number of insured units (columns)."""
         return int(self.values.shape[1])
-
-    @property
-    def years(self) -> NDArray[np.int64]:
-        """Every simulation year, sorted (:meth:`with_years`)."""
-        return self._simulation().years
-
-    @property
-    def event_year(self) -> NDArray[np.int64]:
-        """Simulation year of each event (:meth:`with_years`)."""
-        return self._simulation().event_year
-
-    @property
-    def frequency(self) -> NDArray[np.float64]:
-        """Annual frequency of each event (:meth:`with_years`)."""
-        return self._simulation().frequency
-
-    def _simulation(self) -> SimulationYears:
-        """Return the attached years, or raise if there are none."""
-        if self._years is None:
-            raise ParametricInputError(
-                "the index has no simulation years; attach them with "
-                "index.with_years(hazard_or_impact, ...)"
-            )
-        return self._years
-
-    def event_mask(self, years: ArrayLike | None = None) -> NDArray[np.bool_]:
-        """Return the events whose year is in ``years``.
-
-        Parameters
-        ----------
-        years : array_like of int, optional
-            Simulation years, a subset of :attr:`years`. Default: all.
-
-        Returns
-        -------
-        numpy.ndarray of bool
-            Shape ``(n_events,)``.
-
-        Raises
-        ------
-        ParametricInputError
-            If the index has no years, or a year is not one of them, or
-            repeats.
-        """
-        chosen = self.check_years(years)
-        return np.isin(self.event_year, chosen)
-
-    def check_years(self, years: ArrayLike | None) -> NDArray[np.int64]:
-        """Return ``years`` sorted, checked against the index's years.
-
-        Parameters
-        ----------
-        years : array_like of int or None
-            Simulation years; None means all of :attr:`years`.
-
-        Returns
-        -------
-        numpy.ndarray of int
-            The years, sorted.
-
-        Raises
-        ------
-        ParametricInputError
-            If the index has no years, or the years are empty, repeat or
-            are not among :attr:`years`.
-        """
-        if years is None:
-            return self.years
-        chosen = integer_array(years, "years")
-        if chosen.size == 0 or np.unique(chosen).size != chosen.size:
-            raise ParametricInputError("years must be non-empty and unique")
-        unknown = np.setdiff1d(chosen, self.years)
-        if unknown.size:
-            raise ParametricInputError(
-                f"years not in the index's years, e.g. {unknown[:5].tolist()}"
-            )
-        return np.sort(chosen)
 
     def rows_in(self, impact: Any) -> NDArray[np.intp]:
         """Return the row of ``impact`` of each of the index's events, on ``event_id``.
@@ -304,8 +211,7 @@ class ParametricIndex:
         This is the stated event matching of an index from another hazard
         set than the loss's (module docstring). Index events that the
         impact lacks are left out and counted in a logged warning. The
-        result has the impact's ``event_id`` and ``event_name``, and no
-        simulation years: attach them after matching.
+        result has the impact's ``event_id`` and ``event_name``.
 
         Parameters
         ----------
@@ -363,88 +269,7 @@ class ParametricIndex:
             self.unit_id,
             self.definition,
             event_name=names if len(names) == len(rows) else None,
-            units=self.units,
         )
-
-    def with_years(
-        self,
-        source: Any,
-        *,
-        event_year: ArrayLike | YearSource | None = None,
-        years: ArrayLike | None = None,
-        n_years: int | None = None,
-        first_year: int | None = None,
-    ) -> ParametricIndex:
-        """Return the index with simulation years and frequencies attached.
-
-        The years include those without events, in three parts:
-
-        * **each event's year**, ``event_year``: ``None`` or ``"date"``, the
-          calendar year of ``source.date``; ``"event_name"``, the year in
-          names ``<prefix>_<year>_<number>`` such as IRIS's ``NA_9999_0``
-          (another form raises); or one year per event of ``source``;
-        * **the number of years** ``N``, ``n_years``: by default
-          ``1 / frequency``, which must then be one value;
-        * **the first year**, ``first_year``. Without it, the years start
-          at the first event's year; if the events' years run over fewer
-          than ``N`` years, the ``"event_name"`` route raises, and the
-          others take the first event's year with a logged warning.
-
-        ``years``, every simulation year, can replace ``n_years`` and
-        ``first_year``. A date holds the years 1 to 9999 only, and a
-        synthetic catalogue's tracks often start on one date: use
-        ``event_year="event_name", first_year=0`` for IRIS. Members of an
-        ensemble share their parent's date: pass ``event_year`` as an
-        array, member ``m`` of year ``y`` in year ``y + m N``.
-
-        Parameters
-        ----------
-        source : climada.hazard.Hazard or climada.engine.Impact
-            Holds every event of the index (matched on ``event_id``) with
-            its ``date``, ``event_name`` and ``frequency`` per year. Its
-            other events count for the span of the years.
-        event_year, years, n_years, first_year : optional
-            As above.
-
-        Returns
-        -------
-        ParametricIndex
-            The same index, with :attr:`years`, :attr:`event_year` and
-            :attr:`frequency`.
-
-        Raises
-        ------
-        ImpactInputError
-            If ``source.frequency_unit`` is not ``1/year``.
-        EventAlignmentError
-            If an event of the index is not in ``source``.
-        ParametricInputError
-            If the years cannot be derived or are ambiguous, or a frequency
-            is not positive.
-        """
-        rows, all_years, frequency = simulation_years(
-            source,
-            event_year=event_year,
-            years=years,
-            n_years=n_years,
-            first_year=first_year,
-        )
-        position = _positions(
-            integer_array(np.asarray(source.event_id), "event_id"), "event_id"
-        )
-        missing = [key for key in self.event_id.tolist() if key not in position]
-        if missing:
-            raise EventAlignmentError(
-                f"{len(missing)} of the index's events are not in the source of "
-                f"the years, e.g. {missing[:5]}"
-            )
-        index_rows = [position[key] for key in self.event_id.tolist()]
-        attached = SimulationYears.checked(
-            rows[index_rows], all_years, frequency[index_rows]
-        )
-        out = copy.copy(self)
-        object.__setattr__(out, "_years", attached)
-        return out
 
     @classmethod
     def from_hazard(
@@ -637,7 +462,6 @@ class ParametricIndex:
             events,
             units.unit_id,
             definition,
-            units=units,
         )
 
     @classmethod
@@ -755,57 +579,7 @@ class ParametricIndex:
             units.unit_id,
             definition,
             event_name=names if len(names) == values.shape[0] else None,
-            units=units,
         )
-
-
-def split_years(
-    index: ParametricIndex, *, train_fraction: float = 0.7
-) -> tuple[NDArray[np.int64], NDArray[np.int64]]:
-    """Split the simulation years into a training block and a test block.
-
-    The blocks are contiguous: training is the first
-    ``floor(train_fraction * N)`` years of :attr:`ParametricIndex.years`,
-    testing the rest. All the events of a year stay in the same block.
-    The split reads only :attr:`ParametricIndex.years`, the simulation span
-    that :meth:`ParametricIndex.with_years` attached, including the years
-    without events; it never reads dates.
-
-    Parameters
-    ----------
-    index : ParametricIndex
-        The index whose years are split.
-    train_fraction : float, default 0.7
-        Share of the years in the training block, in ``(0, 1)``.
-
-    Returns
-    -------
-    train, test : numpy.ndarray of int
-        The two blocks of years. Pass them as ``years`` to
-        :func:`~climada_petals.engine.parametric.calibrate.calibrate` and
-        :func:`~climada_petals.engine.parametric.metrics.basis_risk`.
-
-    Raises
-    ------
-    ParametricInputError
-        If ``train_fraction`` is not in ``(0, 1)`` or a block would be empty.
-    """
-    fraction = check_real(
-        "train_fraction",
-        train_fraction,
-        low=0.0,
-        high=1.0,
-        include_low=False,
-        include_high=False,
-    )
-    n_years = index.years.size
-    n_train = math.floor(fraction * n_years + 1e-9)
-    if not 1 <= n_train <= n_years - 1:
-        raise ParametricInputError(
-            f"train_fraction {fraction} of {n_years} years gives {n_train} "
-            "training years; both blocks need at least one year"
-        )
-    return index.years[:n_train].copy(), index.years[n_train:].copy()
 
 
 def _check_units(units: object) -> None:

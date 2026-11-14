@@ -39,11 +39,11 @@ import numpy as np
 
 from climada_petals.engine.parametric import (
     CalibrationError,
+    CatalogueYears,
     CostOfCapitalLoad,
     MeanSquaredError,
     PurePremium,
     StepPayout,
-    outcome_measure,
 )
 from climada_petals.engine.parametric.solvers import (
     CLARABEL_OPTIONS,
@@ -126,9 +126,8 @@ class _FakeCvxpy(ModuleType):
 
 def _data() -> DesignData:
     """Two units, three events in years 0, 0 and 3 of 10."""
-    measure = outcome_measure(
-        [0, 0, 3], [0.1] * 3, basis="annual", years=range(10), n_catalogue_years=10
-    )
+    years = CatalogueYears.from_labels([1, 2, 3], [0, 0, 3], n_years=10)
+    measure = years.measure([1, 2, 3], [0.1] * 3)
     return DesignData(
         problem_id="portfolio",
         index=np.array([[30.0, 10.0], [60.0, 50.0], [25.0, 65.0]]),
