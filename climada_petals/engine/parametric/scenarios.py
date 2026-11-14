@@ -873,17 +873,17 @@ def calibrate_per_scenario(
     >>> designs_table(designs)  # doctest: +SKIP
     """
     checked = _check_set(scenarios)
+    settings = {
+        "scope": scope,
+        "pricing": pricing,
+        "budget": budget,
+        "options": options,
+    }
     designs = {}
     for label in checked.labels:
         try:
             designs[label] = calibrate(
-                template,
-                checked.sample(label),
-                objective,
-                scope=scope,
-                pricing=pricing,
-                budget=budget,
-                options=options,
+                template, checked.sample(label), objective, **settings
             )
         except ParametricError as error:
             error.add_note(f"raised by calibrate_per_scenario at scenario {label!r}")

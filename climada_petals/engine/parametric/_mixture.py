@@ -401,22 +401,31 @@ class MixtureYears(YearSets):
         """
         ids, freq, draws = _events(event_id, frequency, n_draws)
         rows = _positions_of(self.event_id, ids, "sampled years")
-        if self.frequency is not None and not np.allclose(
-            freq, self.frequency[rows], rtol=_FREQUENCY_RTOL, atol=0.0
+        given = self.frequency
+        if given is not None and not np.allclose(
+            freq, given[rows], rtol=_FREQUENCY_RTOL, atol=0.0
         ):
             raise YearRouteError(
                 "the sample's frequencies are not those of the mixture's members"
             )
-        column = np.full(self.event_id.size, -1, dtype=np.int64)
-        column[rows] = np.arange(ids.size)
-        drawn = column[self._positions]
-        year = np.repeat(np.arange(self.n_years), np.diff(self._offsets))
-        kept = drawn >= 0
-        counts = sp.csr_matrix(
-            (np.ones(int(kept.sum())), (year[kept], drawn[kept])),
-            shape=(self.n_years, ids.size),
+        return weighted_annual(
+            self._counts(rows), np.asarray(self.year_weight), draws, YEARSETS
         )
-        return weighted_annual(counts, np.asarray(self.year_weight), draws, YEARSETS)
+
+    def _counts(self, rows: NDArray[np.intp]) -> sp.csr_matrix:
+        """Return the count of each given event (its position, ``rows``) in each year.
+
+        The positions of other events are left out of each year.
+        """
+        place = np.full(self.event_id.size, -1, dtype=np.int64)
+        place[rows] = np.arange(rows.size)
+        found = place[self._positions]
+        sampled = found >= 0
+        of_year = np.repeat(np.arange(self.n_years), np.diff(self._offsets))
+        return sp.coo_matrix(
+            (np.ones(int(sampled.sum())), (of_year[sampled], found[sampled])),
+            shape=(self.n_years, rows.size),
+        ).tocsr()
 
 
 def _year_counts(chosen: NDArray[np.int64], year: NDArray[np.int64]) -> sp.csr_matrix:
