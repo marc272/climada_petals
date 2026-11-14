@@ -41,6 +41,7 @@ import scipy.sparse as sp
 from climada.hazard import Hazard, TCTracks
 
 from climada_petals.engine.parametric import (
+    Budget,
     CatalogueYears,
     CoverDefinitionError,
     EventAlignmentError,
@@ -68,6 +69,7 @@ from climada_petals.engine.parametric.test._synthetic import (
     grid_impact,
     hazard_and_impact,
     shuffled,
+    template,
     three_tracks,
 )
 from climada_petals.util.config import LOGGER
@@ -292,13 +294,19 @@ class TestEvents(unittest.TestCase):
         np.testing.assert_array_equal(self.index.rows_in(reordered), [1, 2, 0])
         payout = StepPayout.uniform(attachment=0.5, exhaustion=2.5, n_steps=2)
         covers = [
-            calibrate(sample, payout=payout, objective=ExpectedUncovered(), budget=0.5)
+            calibrate(
+                template(sample, payout),
+                sample,
+                ExpectedUncovered(),
+                scope="individual",
+                budget=Budget(ratio=0.5),
+            )
             for sample in samples
         ]
-        np.testing.assert_allclose(covers[0].levels, covers[1].levels, atol=1e-12)
+        self.assertEqual(covers[0].cover, covers[1].cover)
         paid = payout_impact(covers[0], samples[1], impact=reordered)
         np.testing.assert_array_equal(paid.event_id, reordered.event_id)
-        unit_paid = covers[0].payout_matrix(self.index)[[2, 0, 1]]
+        unit_paid = covers[0].cover.payout_matrix(self.index)[[2, 0, 1]]
         points = paid.imp_mat.toarray()
         np.testing.assert_allclose(points[:, :3].sum(axis=1), unit_paid[:, 0])
         np.testing.assert_allclose(points[:, 3:5].sum(axis=1), unit_paid[:, 1])

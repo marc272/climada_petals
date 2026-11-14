@@ -602,7 +602,7 @@ def year_block_kfold(
     return tuple(pairs)
 
 
-def check_no_leakage(design: OutcomeSample, evaluation: OutcomeSample) -> None:
+def check_no_leakage(design: Any, evaluation: OutcomeSample) -> None:
     """Raise if two samples of one event set share an event or a block.
 
     Use it on samples split from one sample, such as the sides of
@@ -611,8 +611,12 @@ def check_no_leakage(design: OutcomeSample, evaluation: OutcomeSample) -> None:
 
     Parameters
     ----------
-    design, evaluation : OutcomeSample
-        The two samples, e.g. the training and the test sample.
+    design : OutcomeSample or DesignSample
+        The design sample, or a design's record of it
+        (:attr:`~climada_petals.engine.parametric.calibrate.CalibrationResult.design_sample`),
+        e.g. the training sample.
+    evaluation : OutcomeSample
+        The other sample, e.g. the test sample.
 
     Raises
     ------
@@ -620,9 +624,13 @@ def check_no_leakage(design: OutcomeSample, evaluation: OutcomeSample) -> None:
         If an event, or a block (an ensemble's parent, or a catalogue year),
         is in both.
     ParametricInputError
-        If an argument is not an :class:`OutcomeSample`.
+        If an argument is neither.
     """
-    _check_sample(design)
+    if not isinstance(design, OutcomeSample) and not _is_record(design):
+        raise ParametricInputError(
+            "design must be an OutcomeSample or a design's record of one, got "
+            f"{type(design).__name__}"
+        )
     _check_sample(evaluation)
     events = np.intersect1d(design.event_id, evaluation.event_id)
     if events.size:
@@ -636,6 +644,13 @@ def check_no_leakage(design: OutcomeSample, evaluation: OutcomeSample) -> None:
             "events of a block (an ensemble's parent, or a catalogue year) belong "
             "on one side"
         )
+
+
+def _is_record(design: object) -> bool:
+    """Whether ``design`` is a design's record of its sample: events and blocks."""
+    return isinstance(getattr(design, "event_id", None), np.ndarray) and isinstance(
+        getattr(design, "block", None), np.ndarray
+    )
 
 
 def check_left_out_unpaid(sample: OutcomeSample, paid_at_zero: ArrayLike) -> None:

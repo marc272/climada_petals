@@ -54,9 +54,9 @@ most one event per year, which many event sets exceed.
   every storm of the global set. With frequencies as weights, loss-free
   events below the attachment change nothing.
 
-Where the frequencies sum to at most 1, :meth:`OutcomeMeasure.as_probability`
-adds one outcome without events holding the missing mass, which gives the
-same expectation, VaR and CVaR as above for non-negative values.
+The calibration, the pricings and the metrics read these weights as they
+are, whatever they sum to
+(:mod:`~climada_petals.engine.parametric.riskmeasures`).
 
 The annual basis: ``CatalogueYears`` or ``YearSets``
 ----------------------------------------------------
@@ -290,8 +290,8 @@ class OutcomeMeasure:
     def probability(self) -> NDArray[np.float64]:
         """The weights, the name the objectives, pricings and metrics read.
 
-        They are a probability vector on the annual basis, and on the event
-        basis after :meth:`as_probability`.
+        A probability vector on the annual basis; frequencies per year on the
+        event basis, which may sum to more or less than 1.
         """
         return self.weights
 
@@ -340,45 +340,6 @@ class OutcomeMeasure:
             Per year on both bases.
         """
         return float(self.weights @ self.aggregate(values))
-
-    def as_probability(self) -> OutcomeMeasure:
-        """Return the measure as a probability over outcomes.
-
-        On the annual basis the weights already sum to one. On the event
-        basis, frequencies that sum to less than 1 get one more outcome,
-        without events, holding the missing mass: for non-negative values it
-        gives the expectation, VaR and CVaR of the module docstring.
-
-        Returns
-        -------
-        OutcomeMeasure
-            ``self``, or the measure with the outcome added.
-
-        Raises
-        ------
-        ParametricInputError
-            If the frequencies sum to more than 1 per year (within
-            :data:`PROBABILITY_ATOL`): such an event set has no probability
-            over one year's events. The calibration and the basis-risk
-            metrics take a probability measure, so they need an annual route
-            for it.
-        """
-        missing = 1.0 - self.total_weight
-        if abs(missing) <= PROBABILITY_ATOL:
-            return self
-        if missing < 0:
-            raise ParametricInputError(
-                f"the event basis's frequencies sum to {self.total_weight:.6g} per "
-                "year; the calibration and the basis-risk metrics read the event "
-                "basis as a probability over one year, which needs at most 1. Use "
-                "an annual route: CatalogueYears or YearSets"
-            )
-        grouping = sp.vstack(
-            [self.grouping, sp.csr_matrix((1, self.n_events))], format="csr"
-        )
-        return OutcomeMeasure(
-            grouping, np.append(self.weights, missing), self.basis, self.route
-        )
 
 
 @dataclass(frozen=True, eq=False, kw_only=True)

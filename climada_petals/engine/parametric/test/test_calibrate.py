@@ -16,45 +16,76 @@ with CLIMADA. If not, see <https://www.gnu.org/licenses/>.
 
 ---
 
-Tests of the calibration: hand-worked designs, the LP against numpy, the scopes."""
+Tests of the calibration: golden and hand-worked designs, the LP against
+numpy, the scopes, the template route and the result record.
+
+The golden cases are read with :mod:`._golden`.
+"""
 
 from __future__ import annotations
 
+import dataclasses
 import importlib.util
 import itertools
+import math
 import unittest
+from dataclasses import dataclass
 from types import SimpleNamespace
+from typing import Any, ClassVar
 from unittest import mock
 
 import numpy as np
+import scipy.sparse as sp
+from numpy.typing import ArrayLike
 
 from climada_petals.engine.parametric import (
+    MSE,
+    BinaryPayout,
+    Budget,
     CalibrationError,
+    CalibrationLimitError,
+    CalibrationOptions,
     CalibrationResult,
     CostOfCapitalLoad,
     EventBasis,
     ExpectedUncovered,
     Free,
-    MeanSquaredError,
+    IndexDefinition,
+    Limit,
+    LinearInAmounts,
+    LinearPayout,
     MissingDependencyError,
     OutcomeSample,
+    ParametricCover,
     ParametricIndex,
     ParametricInputError,
+    PiecewiseLinearPayout,
     PurePremium,
     StepPayout,
     WeightedCVaR,
     calibrate,
+    var_cvar,
+)
+from climada_petals.engine.parametric.solvers import Solution
+from climada_petals.engine.parametric.test._golden import (
+    golden_budget,
+    golden_cases,
+    golden_objective,
+    golden_pricing,
+    golden_sample,
 )
 from climada_petals.engine.parametric.test._synthetic import (
     array_index,
     array_sample,
     random_portfolio,
+    template,
 )
 from climada_petals.util.config import LOGGER
 
 HAS_CVXPY = importlib.util.find_spec("cvxpy") is not None
 PAYOUT = StepPayout.uniform(attachment=20.0, exhaustion=70.0, n_steps=4)
 RTOL = 1e-7
+SOLVE_DESIGN = "climada_petals.engine.parametric.calibrate.solve_design"
 
 
 def _hand_example(drop_quiet_event: bool = False) -> OutcomeSample:
@@ -67,48 +98,254 @@ def _hand_example(drop_quiet_event: bool = False) -> OutcomeSample:
     return array_sample(values, loss, years, 10)[0]
 
 
-class TestHandWorkedDesigns(unittest.TestCase):
-    """Designs small enough to solve by hand."""
+def _levels(result: CalibrationResult, unit: Any = "U0") -> list[float]:
+    """Return a unit's amounts in the resolved cover."""
+    payout = result.cover.payout[unit]
+    assert isinstance(payout, LinearInAmounts)
+    return payout.amounts().tolist()
 
-    def test_expected_uncovered_spends_the_budget(self) -> None:
-        cover = calibrate(
-            _hand_example(),
-            payout=StepPayout.uniform(20.0, 70.0, 2),
-            objective=ExpectedUncovered(),
-            budget=0.5,
+
+@dataclass(frozen=True)
+class _Double(LinearInAmounts):
+    """A family whose basis is 2 above a trigger: it pays twice its amount."""
+
+    kind: ClassVar[str] = "test_double"
+
+    trigger: float
+    amount: Any
+    tail: str = "upper"
+
+    def amount_names(self) -> tuple[str, ...]:
+        """Return ``("amount",)``."""
+        return ("amount",)
+
+    def basis(self, index: ArrayLike) -> sp.csr_matrix:
+        """Return 2 where the index reaches the trigger."""
+        values = np.asarray(index, dtype=float)
+        return sp.csr_matrix(2.0 * (values >= self.trigger)[:, None])
+
+
+class TestGoldenDesigns(unittest.TestCase):
+    """The golden design cases, within their stated tolerance."""
+
+    def _check(self, case: dict[str, Any]) -> None:
+        """Design a case and compare it with the case's values."""
+        sample, scale = golden_sample(case)
+        objective = golden_objective(case["objective"])
+        result = calibrate(
+            ParametricCover.from_dict(case["cover"]),
+            sample,
+            objective,
+            scope=case["scope"],
+            pricing=golden_pricing(case["pricing"]),
+            budget=golden_budget(case["budget"]),
         )
-        (problem,) = cover.problems
-        # E[L] = 1.4, so the premium is at most 0.7 and E[U] at least 1.4 - 0.7.
-        self.assertAlmostEqual(problem.objective_value, 0.7, places=9)
-        self.assertAlmostEqual(problem.premium, 0.7, places=9)
-        self.assertIsNotNone(problem.budget_bound)
-        self.assertAlmostEqual(float(problem.budget_bound or 0.0), 0.7, places=12)
-
-    def test_zero_mode_ignores_a_quiet_event_below_the_attachment(self) -> None:
-        values = []
-        for drop in (False, True):
-            cover = calibrate(
-                _hand_example(drop_quiet_event=drop),
-                payout=StepPayout.uniform(20.0, 70.0, 2),
-                objective=ExpectedUncovered(),
-                budget=0.5,
+        expected = case["expected"]
+        squared = scale**2 if isinstance(objective, MSE) else scale
+        if case["scope"] == "joint":
+            pairs = [(result.problems[0], expected["objective_value"])]
+            premiums = [(result.problems[0].premium, expected["premium"])]
+        else:
+            pairs = [
+                (problem, expected["objective_value"][problem.unit_id[0]])
+                for problem in result.problems
+            ]
+            premiums = [
+                (problem.premium, expected["premium"][problem.unit_id[0]])
+                for problem in result.problems
+            ]
+        for problem, value in pairs:
+            self.assertLessEqual(
+                abs(problem.objective_value - value),
+                max(1e-6 * abs(value), 1e-9 * squared),
+                f"objective of {problem.problem_id}",
             )
-            values.append((cover.problems[0].objective_value, cover.premium))
-        np.testing.assert_allclose(values[0], values[1], rtol=1e-9)
+        self.assertEqual(
+            {unit: set(names) for unit, names in result.unidentified.items()},
+            {unit: set(names) for unit, names in expected["unidentified"].items()},
+        )
+        self.assertIsNone(result.unique)
+        if case["compare_parameters"] != "exact":
+            return
+        # Every amount, the filled ones included: the case fills them as
+        # fill="lowest" does.
+        for unit, parameters in expected["parameters"].items():
+            found = result.cover.payout[unit].parameters()
+            for name, value in parameters.items():
+                self.assertLessEqual(abs(found[name] - value), 1e-6 * scale, name)
+        for got, value in premiums:
+            self.assertLessEqual(abs(got - value), max(1e-6 * abs(value), 1e-9 * scale))
+
+    def _run(self, kinds: tuple[str, ...]) -> int:
+        """Check the design cases whose objective is of ``kinds``; return the count."""
+        cases = [
+            case
+            for case in golden_cases("design")
+            if case["objective"]["kind"] in kinds
+        ]
+        for case in cases:
+            with self.subTest(case=case["case_id"]):
+                self._check(case)
+        return len(cases)
+
+    def test_expected_uncovered_and_weighted_cvar(self) -> None:
+        # Both scopes, both bases, both pricings, and the closed forms.
+        self.assertEqual(self._run(("expected_uncovered", "weighted_cvar")), 21)
 
     @unittest.skipUnless(HAS_CVXPY, "the mean squared error needs cvxpy")
-    def test_mean_squared_error_pays_nothing_below_the_attachment(self) -> None:
-        cover = calibrate(
-            _hand_example(),
-            payout=StepPayout.uniform(20.0, 70.0, 2),
-            objective=MeanSquaredError(),
-            budget=5.0,
+    def test_mean_squared_error(self) -> None:
+        self.assertEqual(self._run(("mse",)), 11)
+
+
+class TestHandWorkedDesigns(unittest.TestCase):
+    """Designs small enough to solve by hand, one per family."""
+
+    def test_a_step_payout(self) -> None:
+        sample = _hand_example()
+        cover = template(sample, StepPayout.uniform(20.0, 70.0, 2))
+        # E[L] = 1.4, so the premium is at most 0.7 and E[U] at least 1.4 - 0.7.
+        result = calibrate(
+            cover,
+            sample,
+            ExpectedUncovered(),
+            scope="individual",
+            budget=Budget(ratio=0.5),
         )
-        # An interior-point solution approaches a level at its cap only to
-        # about the square root of the solver tolerance, because the objective
-        # is flat at its optimum; the value is accurate.
-        np.testing.assert_allclose(cover.levels[0], [4.0, 10.0], atol=1e-3)
-        self.assertAlmostEqual(cover.problems[0].objective_value, 0.0, 6)
+        (problem,) = result.problems
+        self.assertAlmostEqual(problem.objective_value, 0.7, places=9)
+        self.assertAlmostEqual(problem.premium, 0.7, places=9)
+        self.assertAlmostEqual(float(problem.budget_bound or 0.0), 0.7, places=12)
+        self.assertAlmostEqual(float(problem.budget_use or 0.0), 1.0, places=9)
+        # The worst year alone: max(4 - t0, 10 - t1) with t0 + t1 = 7 is
+        # smallest at t0 = 0.5, t1 = 6.5.
+        result = calibrate(
+            cover,
+            sample,
+            WeightedCVaR(alpha=1.0, beta=0.9),
+            scope="individual",
+            budget=Budget(ratio=0.5),
+        )
+        self.assertAlmostEqual(result.objective_value, 3.5, places=9)
+        np.testing.assert_allclose(_levels(result), [0.5, 6.5], atol=1e-9)
+        self.assertEqual(result.problems[0].degenerate_tail, "single_outcome")
+
+    def test_a_linear_payout(self) -> None:
+        # Events (40, 5) and (60, 10): shares 0.5 and 1 of the limit. The
+        # premium 0.15 l is at most 0.5 E[L] = 0.75, so l = 5.
+        sample, _ = array_sample(
+            [[40.0], [60.0], [10.0]], [[5.0], [10.0], [0.0]], [0, 1, 2], 10
+        )
+        cover = template(sample, LinearPayout(20.0, 60.0, Free()))
+        result = calibrate(
+            cover,
+            sample,
+            ExpectedUncovered(),
+            scope="individual",
+            budget=Budget(ratio=0.5),
+        )
+        np.testing.assert_allclose(_levels(result), [5.0], rtol=1e-9)
+        self.assertAlmostEqual(result.objective_value, 0.1 * 2.5 + 0.1 * 5.0, places=9)
+        self.assertAlmostEqual(result.premium, 0.75, places=9)
+        self.assertEqual(result.cover.limit, Limit({"U0": 10.0}))
+
+    def test_a_piecewise_linear_payout(self) -> None:
+        # Events at 30, 50 and 70 with losses 2, 6 and 9; the worst two years
+        # are 50 and 70. Per unit of premium, y2 cuts their CVaR most, so the
+        # whole budget 0.85 goes to it: y2 = 0.85 / 0.15.
+        sample, _ = array_sample(
+            [[30.0], [50.0], [70.0], [10.0]],
+            [[2.0], [6.0], [9.0], [0.0]],
+            [0, 1, 2, 3],
+            10,
+        )
+        cover = template(
+            sample, PiecewiseLinearPayout([20.0, 40.0, 60.0], [Free(), Free(), Free()])
+        )
+        result = calibrate(
+            cover,
+            sample,
+            WeightedCVaR(alpha=1.0, beta=0.8),
+            scope="individual",
+            budget=Budget(ratio=0.5),
+        )
+        top = 0.85 / 0.15
+        np.testing.assert_allclose(_levels(result), [0.0, 0.0, top], atol=1e-9)
+        self.assertAlmostEqual(
+            result.objective_value, ((9.0 - top) + (6.0 - top / 2)) / 2, places=9
+        )
+
+    def test_a_binary_payout(self) -> None:
+        # Two events reach the trigger: the premium 0.2 A is at most
+        # 0.5 E[L] = 1.15, so A = 5.75.
+        sample, _ = array_sample(
+            [[40.0], [60.0], [80.0]], [[3.0], [8.0], [12.0]], [0, 1, 2], 10
+        )
+        cover = template(sample, BinaryPayout(50.0, Free()))
+        result = calibrate(
+            cover,
+            sample,
+            ExpectedUncovered(),
+            scope="individual",
+            budget=Budget(ratio=0.5),
+        )
+        np.testing.assert_allclose(_levels(result), [5.75], rtol=1e-9)
+        self.assertAlmostEqual(
+            result.objective_value, 0.1 * (3.0 + 2.25 + 6.25), places=9
+        )
+
+    def test_the_event_basis_above_one_per_year(self) -> None:
+        # Frequencies 0.8, 0.7 and 0.5: the budget 0.25 E[L] = 3.5 buys
+        # A = 3.5 / 1.2, and the worst 0.5 of frequency is the largest event.
+        index, impact, units = array_index(
+            [[40.0], [60.0], [80.0]], [[3.0], [8.0], [12.0]], frequency=[0.8, 0.7, 0.5]
+        )
+        sample = OutcomeSample.from_impact(
+            index, impact, units=units, basis=EventBasis()
+        )
+        self.assertAlmostEqual(sample.measure.total_weight, 2.0)
+        result = calibrate(
+            template(sample, BinaryPayout(50.0, Free())),
+            sample,
+            WeightedCVaR(alpha=1.0, beta=0.5),
+            scope="individual",
+            budget=Budget(ratio=0.25),
+        )
+        amount = 3.5 / 1.2
+        np.testing.assert_allclose(_levels(result), [amount], rtol=1e-9)
+        self.assertAlmostEqual(result.objective_value, 12.0 - amount, places=9)
+        self.assertEqual(result.problems[0].degenerate_tail, "single_outcome")
+
+    def test_loss_free_events_change_nothing_at_twelve_per_year(self) -> None:
+        # ADR 0006's spot check, small: frequencies summing to 12 per year.
+        rng = np.random.default_rng(12)
+        values = rng.uniform(25.0, 80.0, size=(40, 1))
+        loss = (values - 25.0) ** 2
+        quiet = np.full((30, 1), 5.0)
+        results = []
+        for index_values, losses in (
+            (values, loss),
+            (np.vstack([values, quiet]), None),
+        ):
+            losses = np.vstack([loss, np.zeros((30, 1))]) if losses is None else losses
+            index, impact, units = array_index(
+                index_values, losses, frequency=np.full(index_values.shape[0], 0.3)
+            )
+            sample = OutcomeSample.from_impact(
+                index, impact, units=units, basis=EventBasis()
+            )
+            results.append(
+                calibrate(
+                    template(sample, PAYOUT),
+                    sample,
+                    WeightedCVaR(alpha=0.9, beta=0.99),
+                    scope="individual",
+                    budget=Budget(ratio=0.8),
+                )
+            )
+        self.assertAlmostEqual(
+            results[0].objective_value, results[1].objective_value, delta=1e-9
+        )
+        np.testing.assert_allclose(_levels(results[0]), _levels(results[1]), atol=1e-9)
 
 
 class TestLinearProgram(unittest.TestCase):
@@ -117,43 +354,42 @@ class TestLinearProgram(unittest.TestCase):
     def test_optimum_is_feasible_and_matches_numpy(self) -> None:
         cases = itertools.product(
             (0, 1),
-            ("individual", "portfolio"),
+            ("individual", "joint"),
             ("annual", "event"),
             (ExpectedUncovered(), WeightedCVaR(alpha=0.9, beta=0.9)),
             (PurePremium(), CostOfCapitalLoad(rate=0.1, q=0.9)),
         )
         for seed, scope, basis, objective, pricing in cases:
             sample, _ = random_portfolio(seed, basis=basis)
-            cover = calibrate(
+            result = calibrate(
+                template(sample, PAYOUT),
                 sample,
-                payout=PAYOUT,
-                objective=objective,
+                objective,
                 scope=scope,
                 pricing=pricing,
-                budget=0.6,
+                budget=Budget(ratio=0.6),
             )
-            measure = sample.measure.as_probability()
+            measure = sample.measure
             loss = sample.loss.toarray()
-            paid = cover.payout_matrix(sample.index)
+            paid = result.cover.payout_matrix(sample.index)
             caps = loss.max(axis=0)
+            levels = np.array([_levels(result, unit) for unit in sample.unit_id])
             with self.subTest(seed=seed, scope=scope, basis=basis, objective=objective):
-                self.assertTrue(
-                    np.all(np.diff(cover.levels, axis=1) >= -1e-9 * caps.max())
-                )
-                self.assertTrue(np.all(cover.levels >= -1e-12))
-                self.assertTrue(np.all(cover.levels <= caps[:, None] * (1 + 1e-9)))
+                self.assertTrue(np.all(np.diff(levels, axis=1) >= 0.0))
+                self.assertTrue(np.all(levels >= 0.0))
+                self.assertTrue(np.all(levels <= caps[:, None]))
                 units = (
                     [[j] for j in range(3)] if scope == "individual" else [[0, 1, 2]]
                 )
-                for problem, cols in zip(cover.problems, units, strict=True):
+                for problem, cols in zip(result.problems, units, strict=True):
                     total_loss = loss[:, cols].sum(axis=1)
                     total_paid = paid[:, cols].sum(axis=1)
-                    value = objective.evaluate(total_loss, total_paid, measure)
-                    np.testing.assert_allclose(
-                        problem.objective_value, value, rtol=RTOL
+                    self.assertEqual(
+                        problem.objective_value,
+                        objective.evaluate(total_loss, total_paid, measure),
                     )
-                    self.assertAlmostEqual(
-                        problem.premium, pricing.premium(total_paid, measure), 9
+                    self.assertEqual(
+                        problem.premium, pricing.premium(total_paid, measure)
                     )
                     self.assertLessEqual(
                         problem.premium,
@@ -162,30 +398,32 @@ class TestLinearProgram(unittest.TestCase):
 
     def test_alpha_zero_is_expected_uncovered(self) -> None:
         sample, _ = random_portfolio(2)
-        common = {"payout": PAYOUT, "scope": "portfolio", "budget": 0.5}
-        mean = calibrate(sample, objective=ExpectedUncovered(), **common)
-        mixed = calibrate(sample, objective=WeightedCVaR(0.0, 0.95), **common)
+        common = {"scope": "joint", "budget": Budget(ratio=0.5)}
+        cover = template(sample, PAYOUT)
+        mean = calibrate(cover, sample, ExpectedUncovered(), **common)
+        mixed = calibrate(cover, sample, WeightedCVaR(0.0, 0.95), **common)
         np.testing.assert_allclose(
-            mixed.problems[0].objective_value,
-            mean.problems[0].objective_value,
-            rtol=1e-9,
+            mixed.objective_value, mean.objective_value, rtol=1e-9
         )
 
-    def test_a_beta_below_the_loss_free_mass_gives_the_expected_uncovered_design(
+    def test_a_tail_that_holds_every_loss_gives_the_expected_uncovered_design(
         self,
     ) -> None:
         sample, _ = random_portfolio(3)
-        common = {"payout": PAYOUT, "scope": "portfolio", "budget": 0.5}
-        mean = calibrate(sample, objective=ExpectedUncovered(), **common)
-        zero = mean.problems[0].diagnostics["zero_loss_probability"]
+        common = {"scope": "joint", "budget": Budget(ratio=0.5)}
+        cover = template(sample, PAYOUT)
+        mean = calibrate(cover, sample, ExpectedUncovered(), **common)
+        zero = 1.0 - mean.problems[0].loss_weight
         self.assertGreater(zero, 0.1)
         alpha, beta = 0.9, zero / 2
-        tail = calibrate(sample, objective=WeightedCVaR(alpha, beta), **common)
+        with self.assertLogs(LOGGER, "WARNING") as logs:
+            tail = calibrate(cover, sample, WeightedCVaR(alpha, beta), **common)
         problem = tail.problems[0]
-        self.assertTrue(problem.diagnostics["degenerate_tail"])
+        self.assertEqual(problem.degenerate_tail, "expected_uncovered")
+        self.assertIn("minimises E[U] only", "\n".join(logs.output))
         np.testing.assert_allclose(
             problem.objective_value,
-            (alpha / (1 - beta) + 1 - alpha) * mean.problems[0].objective_value,
+            (alpha / (1 - beta) + 1 - alpha) * mean.objective_value,
             rtol=1e-7,
         )
 
@@ -193,16 +431,47 @@ class TestLinearProgram(unittest.TestCase):
         # 60 years: one outcome has probability 1/60, more than 1 - beta.
         sample, _ = random_portfolio(2)
         with self.assertLogs(LOGGER, "WARNING") as logs:
-            cover = calibrate(
+            result = calibrate(
+                template(sample, PAYOUT),
                 sample,
-                payout=PAYOUT,
-                objective=WeightedCVaR(alpha=0.9, beta=0.99),
-                scope="portfolio",
-                budget=0.5,
+                WeightedCVaR(alpha=0.9, beta=0.99),
+                scope="joint",
+                budget=Budget(ratio=0.5),
             )
-        self.assertTrue(cover.problems[0].diagnostics["tail_within_one_outcome"])
-        self.assertTrue(cover.summary()["tail_within_one_outcome"].all())
+        self.assertEqual(result.degenerate_tail, {"joint": "single_outcome"})
+        self.assertEqual(
+            result.summary()["degenerate_tail"].tolist(), ["single_outcome"]
+        )
         self.assertIn("single worst outcome", "\n".join(logs.output))
+
+    def test_the_method_rule_and_the_time_limit(self) -> None:
+        sample, _ = random_portfolio(0)
+        cover = template(sample, PAYOUT)
+        common = {"budget": Budget(ratio=0.5)}
+        methods = {
+            ("individual", "auto"): "highs",
+            ("joint", "auto"): "highs-ipm",
+            ("joint", "highs"): "highs",
+        }
+        for (scope, option), method in methods.items():
+            result = calibrate(
+                cover,
+                sample,
+                ExpectedUncovered(),
+                scope=scope,
+                options=CalibrationOptions(lp_method=option, time_limit=60.0),
+                **common,
+            )
+            with self.subTest(scope=scope, option=option):
+                self.assertEqual({p.solver.method for p in result.problems}, {method})
+        stalled = SimpleNamespace(status=1, message="Time limit reached.", x=None)
+        with (
+            mock.patch(
+                "climada_petals.engine.parametric.solvers.linprog", return_value=stalled
+            ),
+            self.assertRaisesRegex(CalibrationLimitError, "Time limit reached"),
+        ):
+            calibrate(cover, sample, ExpectedUncovered(), scope="joint", **common)
 
     def test_a_failed_solve_raises(self) -> None:
         sample, _ = random_portfolio(0)
@@ -213,18 +482,54 @@ class TestLinearProgram(unittest.TestCase):
             ),
             self.assertRaisesRegex(CalibrationError, "numerical trouble"),
         ):
-            calibrate(sample, payout=PAYOUT, objective=ExpectedUncovered())
+            calibrate(
+                template(sample, PAYOUT),
+                sample,
+                ExpectedUncovered(),
+                scope="individual",
+                budget=Budget(ratio=0.5),
+            )
+
+    def test_a_solution_that_fails_a_check_raises(self) -> None:
+        sample = _hand_example()
+        cover = template(sample, StepPayout.uniform(20.0, 70.0, 2))
+        info = SimpleNamespace(method="highs")
+        cases = {
+            "break their bounds": Solution(np.array([-1.0, 7.0]), 0.7, info),
+            "and the solver's": Solution(np.array([3.0, 4.0]), 0.5, info),
+        }
+        for match, solution in cases.items():
+            with (
+                self.subTest(match=match),
+                mock.patch(SOLVE_DESIGN, return_value=solution),
+                self.assertRaisesRegex(CalibrationError, match),
+            ):
+                calibrate(
+                    cover,
+                    sample,
+                    ExpectedUncovered(),
+                    scope="individual",
+                    budget=Budget(ratio=0.5),
+                )
+
+    def test_a_payout_above_its_limit_raises(self) -> None:
+        # A family whose basis rows sum above 1 pays more than its amount: an
+        # amount of 8 within the limit 10 (the largest loss) pays 16.
+        sample = _hand_example()
+        cover = template(sample, _Double(25.0, 8.0))
+        with self.assertRaisesRegex(CalibrationError, "above its limit"):
+            calibrate(cover, sample, ExpectedUncovered(), scope="individual")
 
 
 class TestScopes(unittest.TestCase):
     """At one total budget, the joint problem relaxes the individual ones."""
 
-    def test_portfolio_optimum_is_at_most_the_individual_designs_on_the_total(
+    def test_the_joint_optimum_is_at_most_the_individual_designs_on_the_total(
         self,
     ) -> None:
-        objectives = [ExpectedUncovered(), WeightedCVaR(alpha=0.9, beta=0.9)]
+        objectives: list[Any] = [ExpectedUncovered(), WeightedCVaR(alpha=0.9, beta=0.9)]
         if HAS_CVXPY:
-            objectives.append(MeanSquaredError())
+            objectives.append(MSE())
         cases = itertools.product(
             (0, 1, 2),
             ("annual", "event"),
@@ -232,149 +537,324 @@ class TestScopes(unittest.TestCase):
             (PurePremium(), CostOfCapitalLoad(rate=0.1, q=0.9)),
             (0.3, 1.0),
         )
-        for seed, basis, objective, pricing, budget in cases:
+        for seed, basis, objective, pricing, ratio in cases:
             sample, _ = random_portfolio(seed, basis=basis)
-            common = {
-                "payout": PAYOUT,
-                "objective": objective,
-                "pricing": pricing,
-                "budget": budget,
-            }
-            single = calibrate(sample, scope="individual", **common)
-            joint = calibrate(sample, scope="portfolio", **common)
-            measure = sample.measure.as_probability()
+            cover = template(sample, PAYOUT)
+            common = {"pricing": pricing, "budget": Budget(ratio=ratio)}
+            single = calibrate(cover, sample, objective, scope="individual", **common)
+            joint = calibrate(cover, sample, objective, scope="joint", **common)
+            measure = sample.measure
             total_loss = sample.loss.toarray().sum(axis=1)
-            total_paid = single.payout_matrix(sample.index).sum(axis=1)
+            total_paid = single.cover.payout_matrix(sample.index).sum(axis=1)
             on_total = objective.evaluate(total_loss, total_paid, measure)
-            optimum = joint.problems[0].objective_value
+            optimum = joint.objective_value
             scale = max(abs(on_total), 1.0)
-            with self.subTest(
-                seed=seed, basis=basis, objective=objective, budget=budget
-            ):
+            with self.subTest(seed=seed, basis=basis, objective=objective, ratio=ratio):
                 # The individual designs fit the joint problem's constraints.
                 self.assertLessEqual(
                     pricing.premium(total_paid, measure),
                     float(joint.problems[0].budget_bound or 0.0) * (1 + RTOL) + 1e-9,
                 )
                 self.assertLessEqual(optimum, on_total + 1e-6 * scale)
-                if not isinstance(objective, MeanSquaredError):
-                    parts = sum(p.objective_value for p in single.problems)
-                    self.assertLessEqual(on_total, parts + 1e-6 * scale)
+                if not isinstance(objective, MSE):
+                    self.assertLessEqual(
+                        on_total, single.objective_value + 1e-6 * scale
+                    )
+
+    def test_a_budget_by_unit(self) -> None:
+        sample, _ = random_portfolio(4)
+        budget = Budget(amount={"U0": 100.0, "U1": 0.0, "U2": 50.0})
+        result = calibrate(
+            template(sample, PAYOUT),
+            sample,
+            ExpectedUncovered(),
+            scope="individual",
+            budget=budget,
+        )
+        self.assertEqual(
+            [problem.budget_bound for problem in result.problems], [100.0, 0.0, 50.0]
+        )
+        self.assertTrue(math.isnan(result.problems[1].budget_use or 0.0))
+        self.assertEqual(_levels(result, "U1"), [0.0] * 4)
+        joint = calibrate(
+            template(sample, PAYOUT),
+            sample,
+            ExpectedUncovered(),
+            scope="joint",
+            budget=Budget(amount=150.0),
+        )
+        self.assertAlmostEqual(joint.premium, 150.0, places=6)
 
 
-class TestCover(unittest.TestCase):
-    """What a cover returns."""
+class TestTemplateRoute(unittest.TestCase):
+    """Any payout linear in its amounts, with fixed shape parameters."""
+
+    def setUp(self) -> None:
+        self.sample, _ = random_portfolio(6)
+        self.common = {"scope": "individual", "budget": Budget(ratio=0.8)}
+
+    def test_payouts_the_old_guard_refused(self) -> None:
+        payouts = {
+            "not monotone": StepPayout.uniform(20.0, 70.0, 4, monotone=False),
+            "fixed level": StepPayout.uniform(20.0, 70.0, 2, levels=[Free(), 50.0]),
+            "bounded level": StepPayout.uniform(
+                20.0, 70.0, 2, levels=[Free(), Free(0.0, 100.0)]
+            ),
+        }
+        for name, payout in payouts.items():
+            result = calibrate(
+                template(self.sample, payout),
+                self.sample,
+                ExpectedUncovered(),
+                **self.common,
+            )
+            levels = np.array([_levels(result, unit) for unit in self.sample.unit_id])
+            with self.subTest(name=name):
+                if name == "fixed level":
+                    np.testing.assert_array_equal(levels[:, 1], 50.0)
+                    self.assertEqual(
+                        result.calibrated["U0"], ("levels[0]",), "fixed stays fixed"
+                    )
+                if name == "bounded level":
+                    self.assertTrue(np.all(levels[:, 1] <= 100.0))
+
+    def test_a_lower_tail(self) -> None:
+        drought = IndexDefinition("table", unit="index", tail="lower")
+        sample, _ = array_sample(
+            [[-0.5], [-1.5], [-2.5], [0.0]],
+            [[0.0], [3.0], [8.0], [0.0]],
+            [0, 1, 2, 3],
+            10,
+            definition=drought,
+        )
+        self.assertEqual(sample.n_left_out, 0)
+        cover = template(
+            sample, StepPayout([-1.0, -2.0], [Free(), Free()], tail="lower")
+        )
+        result = calibrate(cover, sample, ExpectedUncovered(), **self.common)
+        # E[L] = 1.1; the premium 0.1 (t0 + t1) is at most 0.88.
+        self.assertAlmostEqual(result.objective_value, 1.1 - 0.88, places=9)
+
+    def test_a_payout_per_unit_and_a_stated_limit(self) -> None:
+        payouts = {
+            "U0": StepPayout.uniform(20.0, 70.0, 3),
+            "U1": LinearPayout(25.0, 75.0, Free()),
+            "U2": BinaryPayout(40.0, Free()),
+        }
+        cover = template(self.sample, payouts, limit=Limit(300.0))
+        result = calibrate(cover, self.sample, WeightedCVaR(0.9, 0.9), **self.common)
+        self.assertEqual(result.cover.limit, Limit(300.0))
+        frame = result.parameters_frame()
+        amounts = frame[frame["role"] == "amount"]
+        self.assertEqual(amounts["unit_id"].tolist(), ["U0"] * 3 + ["U1", "U2"])
+        self.assertTrue(np.all(amounts["value"] <= 300.0))
+        paid = result.cover.payout_matrix(self.sample.index)
+        self.assertLessEqual(float(paid.max()), 300.0)
+
+    def test_without_a_budget_the_limit_bounds_the_amounts(self) -> None:
+        sample = _hand_example()
+        result = calibrate(
+            template(sample, StepPayout.uniform(20.0, 70.0, 2)),
+            sample,
+            ExpectedUncovered(),
+            scope="individual",
+        )
+        # Every loss is covered, up to the largest loss.
+        self.assertAlmostEqual(result.objective_value, 0.0, places=12)
+        self.assertIsNone(result.problems[0].budget_bound)
+        self.assertIsNone(result.problems[0].budget_use)
+
+
+class TestResult(unittest.TestCase):
+    """What a result records and returns."""
 
     def setUp(self) -> None:
         self.sample, _ = random_portfolio(4)
-        self.cover = calibrate(
-            self.sample,
-            payout=PAYOUT,
-            objective=WeightedCVaR(alpha=0.5, beta=0.9),
-            scope="portfolio",
-            budget=1.0,
+        self.train = self.sample.select(np.arange(30))
+        self.template = template(self.train, PAYOUT)
+        self.result = calibrate(
+            self.template,
+            self.train,
+            WeightedCVaR(alpha=0.5, beta=0.9),
+            scope="joint",
+            pricing=CostOfCapitalLoad(rate=0.1, q=0.9),
+            budget=Budget(ratio=1.0),
         )
 
-    def test_tables(self) -> None:
-        frame = self.cover.levels_frame()
-        self.assertEqual(len(frame), 3 * PAYOUT.n_steps)
-        np.testing.assert_allclose(frame["level"], self.cover.levels.reshape(-1))
-        summary = self.cover.summary()
-        self.assertEqual(summary["problem_id"].tolist(), ["portfolio"])
-        self.assertIn("degenerate_tail", summary.columns)
+    def test_the_record(self) -> None:
+        result = self.result
+        self.assertTrue(result.cover.is_resolved)
+        self.assertEqual(result.template_hash, self.template.definition_hash)
+        self.assertNotEqual(result.cover.definition_hash, result.template_hash)
+        self.assertEqual(result.objective_value, result.problems[0].objective_value)
+        self.assertEqual(result.premium, result.problems[0].premium)
+        self.assertEqual(result.expected_loss, result.problems[0].expected_loss)
+        self.assertEqual((result.basis, result.route), ("annual", "catalogue"))
+        self.assertEqual(result.fill, "lowest")
+        self.assertIsNone(result.ties)
+        record = result.design_sample
+        self.assertEqual(record.n_years, 30)
+        self.assertEqual(record.n_events, self.train.n_events)
+        self.assertEqual(record.n_outcomes, self.train.measure.n_outcomes)
+        np.testing.assert_array_equal(record.event_id, self.train.event_id)
+        np.testing.assert_array_equal(record.block, self.train.block)
+        np.testing.assert_array_equal(record.years, np.arange(30))
+        self.assertEqual(record.split, self.train.split)
+        self.assertEqual(dict(result.calibrated)["U1"], PAYOUT.free_parameters())
 
-    def test_a_cover_checks_its_levels_and_scope(self) -> None:
-        fields = {
-            "payout": PAYOUT,
-            "objective": ExpectedUncovered(),
-            "pricing": PurePremium(),
-            "scope": "individual",
-            "basis": "annual",
-            "budget": None,
-            "unit_id": ("U0", "U1"),
-            "levels": np.zeros((2, PAYOUT.n_steps)),
-            "problems": (),
-            "calibration_years": np.arange(3),
-        }
-        cover = CalibrationResult(**fields)
-        self.assertFalse(cover.levels.flags.writeable)
-        self.assertEqual(cover.premium, 0.0)
-        self.assertIsNone(
-            CalibrationResult(**{**fields, "calibration_years": None}).calibration_years
+    def test_summary_and_parameters(self) -> None:
+        summary = self.result.summary()
+        row = summary.iloc[0]
+        self.assertEqual(row["problem_id"], "joint")
+        self.assertEqual(row["objective"], "weighted_cvar(alpha=0.5, beta=0.9)")
+        self.assertEqual((row["route"], row["solver"]), ("lp", "scipy-highs"))
+        self.assertEqual(row["method"], "highs-ipm")
+        self.assertAlmostEqual(row["budget_use"], row["premium"] / row["budget_bound"])
+        frame = self.result.parameters_frame()
+        self.assertEqual(len(frame), 3 * 2 * PAYOUT.n_steps)
+        levels = frame[frame["role"] == "amount"]
+        self.assertTrue(levels["calibrated"].all())
+        shapes = frame[frame["role"] == "shape"]
+        self.assertFalse(shapes["calibrated"].any())
+        np.testing.assert_array_equal(
+            shapes["value"].iloc[: PAYOUT.n_steps], PAYOUT.breakpoints
         )
-        with self.assertRaisesRegex(ParametricInputError, "levels must have shape"):
-            CalibrationResult(**{**fields, "levels": np.zeros((2, 1))})
+
+    def test_filled_amounts(self) -> None:
+        # One unit's index never reaches the last step in training.
+        sample, _ = array_sample(
+            [[30.0, 30.0], [60.0, 40.0], [65.0, 25.0]],
+            [[4.0, 2.0], [10.0, 5.0], [12.0, 1.0]],
+            [0, 1, 2],
+            10,
+        )
+        cover = template(sample, StepPayout.uniform(20.0, 70.0, 2))
+        result = calibrate(
+            cover, sample, ExpectedUncovered(), scope="joint", budget=Budget(ratio=0.5)
+        )
+        self.assertEqual(dict(result.unidentified), {"U0": (), "U1": ("levels[1]",)})
+        self.assertFalse(result.filled(sample.index).any())
+        later = ParametricIndex(
+            [[60.0, 60.0], [30.0, 30.0]],
+            [7, 8],
+            sample.unit_id,
+            sample.index.definition,
+        )
+        np.testing.assert_array_equal(
+            result.filled(later), [[False, True], [False, False]]
+        )
+        payout = result.cover.payout["U1"]
+        assert isinstance(payout, StepPayout)
+        self.assertEqual(payout.levels[1], payout.levels[0])
+        highest = calibrate(
+            cover,
+            sample,
+            ExpectedUncovered(),
+            scope="joint",
+            budget=Budget(ratio=0.5),
+            options=CalibrationOptions(fill="highest"),
+        )
+        self.assertEqual(_levels(highest, "U1")[1], 5.0)
+        other = ParametricIndex(later.values, [7, 8], ("A", "B"), later.definition)
+        with self.assertRaisesRegex(ParametricInputError, "definition and units"):
+            result.filled(other)
+
+    def test_the_scope_is_checked(self) -> None:
         with self.assertRaisesRegex(ParametricInputError, "scope must be one of"):
-            CalibrationResult(**{**fields, "scope": "cluster"})
-
-    def test_payouts_need_the_covers_units(self) -> None:
-        other, _, _ = array_index(np.zeros((2, 3)), np.zeros((2, 3)))
-        other = ParametricIndex(
-            other.values, other.event_id, ("A", "B", "C"), other.definition
-        )
-        with self.assertRaisesRegex(ParametricInputError, "not the cover's"):
-            self.cover.payout_matrix(other)
-
-    def test_training_years_only(self) -> None:
-        train = np.arange(20)
-        cover = calibrate(
-            self.sample.select(train), payout=PAYOUT, objective=ExpectedUncovered()
-        )
-        np.testing.assert_array_equal(cover.calibration_years, train)
-        on_events, _ = random_portfolio(4, basis="event")
-        cover = calibrate(on_events, payout=PAYOUT, objective=ExpectedUncovered())
-        self.assertIsNone(cover.calibration_years)
-        self.assertEqual(cover.basis, "event")
+            dataclasses.replace(self.result, scope="portfolio")
 
 
 class TestInputs(unittest.TestCase):
     """Invalid inputs raise before anything is solved."""
 
+    def setUp(self) -> None:
+        self.sample, _ = random_portfolio(0)
+        self.cover = template(self.sample, PAYOUT)
+
     def test_invalid_arguments_raise(self) -> None:
-        sample, _ = random_portfolio(0)
-        good = {"payout": PAYOUT, "objective": ExpectedUncovered()}
-        bad = [
-            {"scope": "cluster"},
-            {"budget": -1.0},
-            {"objective": "mse"},
-            {"pricing": 0.1},
-        ]
-        for change in bad:
-            with self.subTest(change=change), self.assertRaises(ParametricInputError):
-                calibrate(sample, **{**good, **change})
-
-    def test_sample_and_payout_types_are_checked(self) -> None:
-        sample, _ = random_portfolio(0)
-        good = {"payout": PAYOUT, "objective": ExpectedUncovered()}
-        for wrong in (sample.index, sample.index.values):
-            with (
-                self.subTest(sample=type(wrong).__name__),
-                self.assertRaisesRegex(ParametricInputError, "OutcomeSample"),
-            ):
-                calibrate(wrong, **good)
-        with self.assertRaisesRegex(ParametricInputError, "StepPayout"):
-            calibrate(sample, **{**good, "payout": (20.0, 70.0, 4)})
-
-    def test_a_payout_the_solver_cannot_take_is_refused(self) -> None:
-        sample, _ = random_portfolio(0)
-        good = {"objective": ExpectedUncovered()}
-        bad = {
-            "lower tail": StepPayout.uniform(70.0, 20.0, 4, tail="lower"),
-            "not monotone": StepPayout.uniform(20.0, 70.0, 4, monotone=False),
-            "fixed level": StepPayout.uniform(20.0, 70.0, 2, levels=[Free(), 1.0e6]),
-            "bounded level": StepPayout.uniform(
-                20.0, 70.0, 2, levels=[Free(), Free(0.0, 1.0e6)]
-            ),
-            "free breakpoint": StepPayout(
-                [20.0, Free(30.0, 50.0, grid=3)], [Free(), Free()]
-            ),
+        good = {
+            "template": self.cover,
+            "sample": self.sample,
+            "objective": ExpectedUncovered(),
+            "scope": "individual",
+            "budget": Budget(ratio=0.5),
         }
-        for name, payout in bad.items():
+        bad = {
+            "template": self.cover.payout["U0"],
+            "sample": self.sample.index,
+            "objective": "mse",
+            "scope": "portfolio",
+            "pricing": 0.1,
+            "budget": 0.5,
+            "options": {"fill": "lowest"},
+        }
+        for name, value in bad.items():
             with (
                 self.subTest(name=name),
-                self.assertRaisesRegex(ParametricInputError, "Free()"),
+                self.assertRaisesRegex(ParametricInputError, name),
             ):
-                calibrate(sample, payout=payout, **good)
+                calibrate(**{**good, name: value})
+
+    def test_a_template_that_does_not_fit_the_sample_raises(self) -> None:
+        cases = {
+            "units are not": ParametricCover(
+                self.cover.index,
+                PAYOUT,
+                unit_id=["U0", "U1"],
+                payout_unit="USD",
+            ),
+            "the template pays on": ParametricCover(
+                IndexDefinition("table", unit="m/s", source="elsewhere"),
+                PAYOUT,
+                unit_id=self.sample.unit_id,
+                payout_unit="USD",
+            ),
+        }
+        for match, cover in cases.items():
+            with (
+                self.subTest(match=match),
+                self.assertRaisesRegex(ParametricInputError, match),
+            ):
+                calibrate(cover, self.sample, ExpectedUncovered(), scope="joint")
+
+    def test_routes_and_options_this_version_does_not_have_raise(self) -> None:
+        cases = [
+            (ExpectedUncovered(), CalibrationOptions(ranges=True), "ranges=True"),
+            (MSE(), CalibrationOptions(time_limit=1.0), "takes none"),
+        ]
+        for objective, options, match in cases:
+            with (
+                self.subTest(match=match),
+                self.assertRaisesRegex(ParametricInputError, match),
+            ):
+                calibrate(
+                    self.cover, self.sample, objective, scope="joint", options=options
+                )
+
+    def test_invalid_options_raise(self) -> None:
+        bad = [
+            {"fill": "middle"},
+            {"ranges": 1},
+            {"lp_method": "simplex"},
+            {"feasibility_tolerance": 0.0},
+            {"time_limit": -1.0},
+        ]
+        for fields in bad:
+            with self.subTest(fields=fields), self.assertRaises(ParametricInputError):
+                CalibrationOptions(**fields)
+
+    def test_a_linear_objective_needs_a_budget_or_bounds(self) -> None:
+        unbounded = template(self.sample, PAYOUT, limit=None)
+        with self.assertRaisesRegex(ParametricInputError, "needs a budget or bounded"):
+            calibrate(unbounded, self.sample, ExpectedUncovered(), scope="individual")
+        result = calibrate(
+            unbounded,
+            self.sample,
+            ExpectedUncovered(),
+            scope="individual",
+            budget=Budget(ratio=0.5),
+        )
+        self.assertIsNone(result.cover.limit)
 
     def test_a_payout_that_pays_at_zero_on_left_out_events_is_refused(self) -> None:
         # The third event has no loss and an index of 0: the sample leaves it out.
@@ -382,43 +862,70 @@ class TestInputs(unittest.TestCase):
             [[30.0], [60.0], [0.0]], [[4.0], [10.0], [0.0]], [0, 1, 2], 10
         )
         self.assertEqual(sample.n_left_out, 1)
-        good = {"objective": ExpectedUncovered(), "budget": 0.5}
+        common = {"scope": "individual", "budget": Budget(ratio=0.5)}
         at_zero = StepPayout.uniform(0.0, 70.0, 2)
         with self.assertRaisesRegex(ParametricInputError, "left out 1 events"):
-            calibrate(sample, payout=at_zero, **good)
+            calibrate(template(sample, at_zero), sample, ExpectedUncovered(), **common)
         # A payout with nothing at an index of 0 goes ahead.
-        cover = calibrate(sample, payout=StepPayout.uniform(20.0, 70.0, 2), **good)
-        self.assertAlmostEqual(cover.problems[0].objective_value, 0.7, places=9)
+        result = calibrate(
+            template(sample, StepPayout.uniform(20.0, 70.0, 2)),
+            sample,
+            ExpectedUncovered(),
+            **common,
+        )
+        self.assertAlmostEqual(result.objective_value, 0.7, places=9)
         # So does one at 0 on a sample that left nothing out.
-        calibrate(_hand_example(), payout=at_zero, **good)
+        whole = _hand_example()
+        calibrate(template(whole, at_zero), whole, ExpectedUncovered(), **common)
 
     def test_years_without_events_raise(self) -> None:
         sample, _ = array_sample([[30.0]], [[1.0]], [0], 10)
         with self.assertRaisesRegex(ParametricInputError, "no event"):
             sample.select([5, 6])
 
-    def test_frequencies_above_one_per_year_on_the_event_basis_raise(self) -> None:
-        # The event basis holds them; the calibration reads it as a
-        # probability over one year, which needs at most 1.
-        index, impact, units = array_index(
-            [[30.0], [60.0]], [[4.0], [10.0]], frequency=[0.8, 0.7]
-        )
-        sample = OutcomeSample.from_impact(
-            index, impact, units=units, basis=EventBasis()
-        )
-        self.assertAlmostEqual(sample.measure.total_weight, 1.5)
-        with self.assertRaisesRegex(ParametricInputError, "sum to 1.5 per year"):
-            calibrate(sample, payout=PAYOUT, objective=ExpectedUncovered())
-
     def test_mean_squared_error_without_cvxpy_raises(self) -> None:
-        sample, _ = random_portfolio(0)
         with mock.patch.dict("sys.modules", {"cvxpy": None}):
             with self.assertRaisesRegex(MissingDependencyError, "cvxpy"):
-                calibrate(sample, payout=PAYOUT, objective=MeanSquaredError())
+                calibrate(self.cover, self.sample, MSE(), scope="individual")
             # The linear objectives need no cvxpy.
             calibrate(
-                sample, payout=PAYOUT, objective=WeightedCVaR(alpha=0.9, beta=0.9)
+                self.cover,
+                self.sample,
+                WeightedCVaR(alpha=0.9, beta=0.9),
+                scope="individual",
             )
+
+    def test_a_loss_free_event_below_the_attachment_changes_nothing(self) -> None:
+        values = []
+        for drop in (False, True):
+            sample = _hand_example(drop_quiet_event=drop)
+            result = calibrate(
+                template(sample, StepPayout.uniform(20.0, 70.0, 2)),
+                sample,
+                ExpectedUncovered(),
+                scope="individual",
+                budget=Budget(ratio=0.5),
+            )
+            values.append((result.objective_value, result.premium))
+        np.testing.assert_allclose(values[0], values[1], rtol=1e-9)
+
+
+@unittest.skipUnless(HAS_CVXPY, "the mean squared error needs cvxpy")
+class TestMeanSquaredError(unittest.TestCase):
+    """The mean squared error keeps its cvxpy route in this version."""
+
+    def test_a_design_pays_nothing_below_the_attachment(self) -> None:
+        sample = _hand_example()
+        result = calibrate(
+            template(sample, StepPayout.uniform(20.0, 70.0, 2)),
+            sample,
+            MSE(),
+            scope="individual",
+            budget=Budget(ratio=5.0),
+        )
+        np.testing.assert_allclose(_levels(result), [4.0, 10.0], atol=1e-3)
+        self.assertAlmostEqual(result.objective_value, 0.0, 6)
+        self.assertEqual(result.problems[0].solver.route, "qp")
 
 
 if __name__ == "__main__":

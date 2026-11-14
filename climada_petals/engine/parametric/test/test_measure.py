@@ -120,21 +120,6 @@ class TestOutcomeMeasure(unittest.TestCase):
         with self.assertRaisesRegex(ParametricInputError, "2 rows"):
             measure.aggregate([1.0, 2.0, 3.0])
 
-    def test_as_probability_adds_the_missing_mass_as_an_outcome(self) -> None:
-        measure = EventBasis().measure([1, 2], [0.1, 0.2])
-        padded = measure.as_probability()
-        np.testing.assert_allclose(padded.probability, [0.1, 0.2, 0.7])
-        np.testing.assert_allclose(padded.aggregate([4.0, 5.0]), [4.0, 5.0, 0.0])
-        self.assertAlmostEqual(padded.expectation([4.0, 5.0]), 1.4)
-        self.assertEqual((padded.basis, padded.route), ("event", "frequency"))
-        whole = EventBasis().measure([1, 2], [0.5, 0.5])
-        self.assertIs(whole.as_probability(), whole)
-        annual = CatalogueYears.from_labels([1], [0], n_years=4).measure([1], [0.25])
-        self.assertIs(annual.as_probability(), annual)
-        above = EventBasis().measure([1, 2], [0.8, 0.7])
-        with self.assertRaisesRegex(ParametricInputError, "sum to 1.5 per year"):
-            above.as_probability()
-
 
 class TestEventBasis(unittest.TestCase):
     """One outcome per event, weighted by its frequency, whatever the sum."""
