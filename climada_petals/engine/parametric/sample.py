@@ -821,7 +821,8 @@ def _check_rng(rng: object) -> None:
     if not isinstance(rng, np.random.Generator):
         raise ParametricInputError(
             "year sets and the event basis are split into pools of blocks drawn at "
-            "random: pass rng, a numpy.random.Generator such as "
+            "random, and year sets sample each part's years: pass rng, a "
+            "numpy.random.Generator such as "
             f"numpy.random.default_rng(seed); got {type(rng).__name__}"
         )
 
