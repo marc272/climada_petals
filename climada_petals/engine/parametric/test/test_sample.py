@@ -16,7 +16,8 @@ with CLIMADA. If not, see <https://www.gnu.org/licenses/>.
 
 ---
 
-Tests of the outcome measures and the risk measures.Tests of the outcome measures, the bases and the risk measures.Tests of the outcome samples, the routes on CLIMADA objects and the splits.
+Tests of the outcome samples, the routes on CLIMADA objects, the splits,
+the samples' source tokens and one unit's sample.
 
 The catalogue tests use a 10,000-year catalogue in the IRIS layout
 (:data:`STORMS`): storms named ``NA_<year>_<number>`` in years 0 to 9,999,
