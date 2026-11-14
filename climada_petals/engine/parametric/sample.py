@@ -34,6 +34,8 @@ a lower-tail index every event is kept, because an index of 0 can be severe
 there. The catalogue route's frequency check runs on the kept events: the
 tropical-cyclone files hold every storm of the globe, with other
 frequencies only on storms that never reach a given country.
+:meth:`OutcomeSample.from_impact_draws` takes one ``Impact`` per draw of
+the impact functions, with the same rule.
 
 Splits with no leakage
 ----------------------
@@ -172,7 +174,7 @@ class OutcomeSample:
         On catalogue years only: the simulation years the sample covers, a
         block of a split. Default: all of them.
     n_draws : int, default 1
-        Draws per event, reserved for impact-function draws.
+        Draws per event: impact-function draws (:meth:`from_impact_draws`).
     scenario : str, default "baseline"
         A label for the tables.
     split : SplitRecord, optional

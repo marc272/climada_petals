@@ -152,7 +152,8 @@ CLIMADA objects
 :func:`payout_impact` returns the payouts as a CLIMADA ``Impact``, and
 :func:`uncovered_impact` the uncovered losses ``(L_e - P_e)^+``, of one
 draw on a sample with impact-function draws, on the exposure points of the
-units: a unit's value maps back to its points by value share. Both are non-negative, so ``calc_freq_curve``, ``eai_exp``,
+units: a unit's value maps back to its points by value share. Both are
+non-negative, so ``calc_freq_curve``, ``eai_exp``,
 ``local_exceedance_impact`` and ``write_hdf5`` work on them unchanged. A
 signed net loss is not an ``Impact``: ``local_exceedance_impact`` would drop
 its negative part, and the premium, which is annual, has no place in an
