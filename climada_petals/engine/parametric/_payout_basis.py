@@ -16,8 +16,8 @@ with CLIMADA. If not, see <https://www.gnu.org/licenses/>.
 
 ---
 
-The building blocks of the payout families: index values, severity, and
-the bases' matrices.
+The building blocks of the payout families: index values, severity, the
+bases' matrices and the amounts.
 
 A family of :mod:`~climada_petals.engine.parametric.payout` works on the
 severity of the index, ``s = x`` for ``tail="upper"`` and ``s = -x`` for
@@ -28,6 +28,10 @@ one unit's index values and a family's fixed thresholds to severity
 bases of the step, the piecewise-linear and the binary families from the
 severities (:func:`step_basis`, :func:`piecewise_basis`,
 :func:`binary_basis`): one row per index value, one column per amount.
+For a payout that is linear in its amounts, :func:`fixed_amounts` and
+:func:`amount_bounds` return the amounts and their bounds under a limit,
+the defaults of
+:class:`~climada_petals.engine.parametric.payout.LinearInAmounts`.
 """
 
 from __future__ import annotations
