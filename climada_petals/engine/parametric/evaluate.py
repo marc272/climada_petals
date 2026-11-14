@@ -125,7 +125,7 @@ Index diagnostics
 -----------------
 :func:`evaluate` and :func:`compare` run
 :func:`~climada_petals.engine.parametric.basis_risk.index_diagnostics` on
-the evaluation sample, at the default threshold, once per call. Where the
+the evaluation sample, at its defaults, once per call. Where the
 index determines the loss almost one-to-one, a cover can replicate the
 loss and the basis-risk metrics read close to zero: such units log a
 warning and are marked in ``comonotone_index``. Null where the correlation

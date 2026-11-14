@@ -63,15 +63,34 @@ measurement.
 Measuring it
 ------------
 :func:`index_diagnostics` returns, per unit, the frequency-weighted
-Spearman correlation of index and loss, the flag ``comonotone_index`` and
-the share of the expected loss on events with an index of 0. The flag says
-that the index determines the loss almost one-to-one, in the direction the
-cover pays. :func:`~climada_petals.engine.parametric.calibrate.calibrate`
-and :func:`~climada_petals.engine.parametric.evaluate.evaluate` run it on
-their samples at the default threshold: a flagged unit logs a warning
-through the module's ``LOGGER`` and sets the ``comonotone_index`` column of
-the design's ``summary()`` and of the evaluation's table, so that a reader
-of a table sees it.
+Spearman correlation of index and loss, how far the loss is from a
+non-decreasing function of the index (``monotone_gap``), the flag
+``comonotone_index`` and the share of the expected loss on events with an
+index of 0. The flag says that the index determines the loss, in the
+direction the cover pays. It is set by either of two rules, over the
+events with a loss or a non-zero index at the unit:
+
+* **The loss is a non-decreasing function of the index**, oriented by the
+  index's tail, within a tolerance: the largest fall of the loss as the
+  index rises, as a share of the unit's largest loss, is at most
+  ``tolerance``, 1e-6 by default, which allows for rounding. This is the
+  degenerate case itself: one exposure point at the index's centroid and
+  one impact function. A rank correlation can miss it: the events whose
+  index stays below the impact function's threshold have a loss of 0, and
+  their tied ranks take the correlation well below 1, though the loss is
+  still a function of the index.
+* **The Spearman correlation**, oriented by the index's tail, is at least
+  ``threshold``, 0.99 by default: the index determines the loss almost
+  one-to-one, as for a small group of points.
+
+:func:`~climada_petals.engine.parametric.calibrate.calibrate` and
+:func:`~climada_petals.engine.parametric.evaluate.evaluate` run it on their
+samples at the defaults: a flagged unit logs a warning through the
+module's ``LOGGER`` and sets the ``comonotone_index`` column of the
+design's ``summary()`` and of the evaluation's table, so that a reader of a
+table sees it. The flag describes the sample: on a short record a few
+events can lie on a non-decreasing curve by chance, and a design on them
+then reads as free of basis risk too.
 
 The default threshold, 0.99, rests on one synthetic tropical-cyclone site,
 with designs that minimise the expected uncovered loss on the annual basis,
@@ -123,6 +142,7 @@ from .sample import OutcomeSample
 __all__ = [
     "COMONOTONE_THRESHOLD",
     "DIAGNOSTIC_COLUMNS",
+    "MONOTONE_TOLERANCE",
     "comonotone_flags",
     "comonotone_of",
     "diagnose",
@@ -133,11 +153,16 @@ __all__ = [
 COMONOTONE_THRESHOLD: Final[float] = 0.99
 """The default threshold of :func:`index_diagnostics` (module docstring)."""
 
+MONOTONE_TOLERANCE: Final[float] = 1e-6
+"""The default tolerance of :func:`index_diagnostics` (module docstring)."""
+
 DIAGNOSTIC_COLUMNS: Final[tuple[str, ...]] = (
     "unit_id",
     "n_events",
     "spearman",
     "threshold",
+    "monotone_gap",
+    "tolerance",
     "comonotone_index",
     "zero_index_loss_share",
 )
@@ -178,34 +203,63 @@ def _spearman(
     return min(1.0, max(-1.0, found))
 
 
+def _monotone_gap(
+    index: NDArray[np.float64], loss: NDArray[np.float64], weights: NDArray[np.float64]
+) -> float:
+    """Return the largest fall of the loss as the index rises, over its largest loss.
+
+    Over the rows of positive weight: the largest ``L_r - L_s`` over rows
+    with ``x_r <= x_s``, which counts two losses at one index value both
+    ways, divided by the largest loss; 0 if the loss is a non-decreasing
+    function of the index. The loss is then within half the fall of such a
+    function. NaN without a positive loss.
+    """
+    positive = weights > 0
+    index, loss = index[positive], loss[positive]
+    top = float(loss.max()) if loss.size else 0.0
+    if top <= 0:
+        return math.nan
+    distinct, inverse = np.unique(index, return_inverse=True)
+    low = np.full(distinct.size, np.inf)
+    high = np.full(distinct.size, -np.inf)
+    np.minimum.at(low, inverse, loss)
+    np.maximum.at(high, inverse, loss)
+    return max(0.0, float(np.max(np.maximum.accumulate(high) - low))) / top
+
+
 def _unit_row(
     unit: Hashable,
     values: NDArray[np.float64],
     loss: NDArray[np.float64],
     weights: NDArray[np.float64],
-    rule: tuple[float, float],
+    rule: tuple[float, float, float],
 ) -> dict[str, Any]:
     """Return one unit's diagnostics.
 
     ``values`` is the unit's index per event, ``loss`` and ``weights`` its
-    loss and weight per row (draw, then event), and ``rule`` the threshold
-    and the tail's sign.
+    loss and weight per row (draw, then event), and ``rule`` the threshold,
+    the tolerance and the tail's sign.
     """
-    level, sign = rule
+    level, tolerance, sign = rule
     n_draws = loss.size // values.size
     index = np.tile(values, n_draws)
     lossy = (loss.reshape(n_draws, values.size) > 0).any(axis=0)
     events = lossy | (values != 0)
     rows = np.tile(events, n_draws)
     rho = _spearman(index[rows], loss[rows], weights[rows])
+    gap = _monotone_gap(sign * index[rows], loss[rows], weights[rows])
     expected = float(weights @ loss)
     return {
         "unit_id": unit,
         "n_events": int(events.sum()),
         "spearman": rho,
         "threshold": level,
+        "monotone_gap": gap,
+        "tolerance": tolerance,
         "comonotone_index": (
-            None if math.isnan(rho) else bool(sign * rho >= level - _ROUNDING)
+            None
+            if math.isnan(rho)
+            else bool(gap <= tolerance or sign * rho >= level - _ROUNDING)
         ),
         "zero_index_loss_share": (
             float(weights @ (loss * (index == 0))) / expected
@@ -216,7 +270,10 @@ def _unit_row(
 
 
 def index_diagnostics(
-    sample: OutcomeSample, *, threshold: float = COMONOTONE_THRESHOLD
+    sample: OutcomeSample,
+    *,
+    threshold: float = COMONOTONE_THRESHOLD,
+    tolerance: float = MONOTONE_TOLERANCE,
 ) -> pd.DataFrame:
     """Return, per unit, how far the index determines the loss (module docstring).
 
@@ -231,6 +288,9 @@ def index_diagnostics(
     threshold : float, default 0.99
         The Spearman correlation, oriented by the index's tail, from which
         the index counts as determining the loss, in ``(0, 1]``.
+    tolerance : float, default 1e-6
+        The ``monotone_gap`` up to which the loss counts as a non-decreasing
+        function of the index, in ``[0, 1)``.
 
     Returns
     -------
@@ -239,15 +299,22 @@ def index_diagnostics(
         :data:`DIAGNOSTIC_COLUMNS`:
 
         * ``n_events``: the events with a loss in some draw or a non-zero
-          index at the unit, over which the correlation runs, with all
-          their draws;
+          index at the unit, the unit's rows, with all their draws;
         * ``spearman``: the frequency-weighted Spearman correlation of index
           and loss over them, ties taking their mid-rank; NaN if the index
           or the loss takes one value there;
         * ``threshold``: as given;
-        * ``comonotone_index``: whether the correlation, negated on a
-          lower-tail index (where the cover pays as the index falls), is at
-          least ``threshold``, allowing 1e-12 for rounding; None where the
+        * ``monotone_gap``: the largest fall of the loss as the index
+          rises, oriented by its tail, over the unit's rows of positive
+          weight, as a share of the largest loss there. Two rows with one
+          index value and two losses (two draws of an event, say) count as
+          a fall. 0 if the loss is a non-decreasing function of the index
+          there; NaN without a loss;
+        * ``tolerance``: as given;
+        * ``comonotone_index``: whether ``monotone_gap`` is at most
+          ``tolerance``, or the correlation, negated on a lower-tail index
+          (where the cover pays as the index falls), is at least
+          ``threshold``, allowing 1e-12 for rounding; None where the
           correlation is NaN;
         * ``zero_index_loss_share``: the share of the unit's expected loss
           on events with an index of exactly 0, NaN without loss. On an
@@ -258,20 +325,21 @@ def index_diagnostics(
     Raises
     ------
     ParametricInputError
-        If ``sample`` is not an ``OutcomeSample`` or ``threshold`` is not in
-        ``(0, 1]``.
+        If ``sample`` is not an ``OutcomeSample``, ``threshold`` is not in
+        ``(0, 1]`` or ``tolerance`` not in ``[0, 1)``.
 
     Examples
     --------
     >>> table = index_diagnostics(sample)  # doctest: +SKIP
-    >>> table[["unit_id", "spearman", "comonotone_index"]]  # doctest: +SKIP
+    >>> table[["unit_id", "spearman", "monotone_gap", "comonotone_index"]]  # doctest: +SKIP
     """
     if not isinstance(sample, OutcomeSample):
         raise ParametricInputError(
             f"sample must be an OutcomeSample, got {type(sample).__name__}"
         )
     level = check_real("threshold", threshold, low=0.0, high=1.0, include_low=False)
-    rule = (level, -1.0 if sample.index.definition.tail == "lower" else 1.0)
+    allowed = check_real("tolerance", tolerance, low=0.0, high=1.0, include_high=False)
+    rule = (level, allowed, -1.0 if sample.index.definition.tail == "lower" else 1.0)
     weights = np.tile(sample.frequency, sample.n_draws) / sample.n_draws
     loss = sp.csc_matrix(sample.loss)
     frame = pd.DataFrame(
@@ -330,7 +398,7 @@ def comonotone_of(
 
 
 def diagnose(sample: OutcomeSample, where: str) -> pd.DataFrame:
-    """Run :func:`index_diagnostics` at the default threshold; warn of flagged units.
+    """Run :func:`index_diagnostics` at its defaults; warn of flagged units.
 
     Parameters
     ----------
@@ -349,9 +417,11 @@ def diagnose(sample: OutcomeSample, where: str) -> pd.DataFrame:
     if flagged:
         LOGGER.warning(
             "%s: at %d of %d units, e.g. %s, the index determines the loss almost "
-            "one-to-one (frequency-weighted Spearman correlation of index and loss "
-            "at least %g, oriented by the index's tail), so a cover can replicate "
-            "the loss and basis risk reads close to zero. Basis risk needs a "
+            "one-to-one (the loss is a non-decreasing function of the index within "
+            "%g of its largest value, or the frequency-weighted Spearman "
+            "correlation of index and loss is at least %g, oriented by the index's "
+            "tail), so a cover can replicate the loss and basis risk reads close "
+            "to zero. Basis risk needs a "
             "stated source: an index from another hazard set or resolution, a "
             "statistic over a group of points, a track-based trigger, a table of "
             "readings, or impact-function draws. The comonotone_index column marks "
@@ -360,6 +430,7 @@ def diagnose(sample: OutcomeSample, where: str) -> pd.DataFrame:
             len(flagged),
             sample.n_units,
             flagged[:5],
+            MONOTONE_TOLERANCE,
             COMONOTONE_THRESHOLD,
         )
     return table
