@@ -29,6 +29,7 @@ import unittest
 from climada_petals.engine.parametric import (
     CatalogueYears,
     CostOfCapitalLoad,
+    EventBasis,
     ParametricInputError,
     PurePremium,
 )
@@ -56,6 +57,26 @@ class TestPricing(unittest.TestCase):
         self.assertAlmostEqual(
             CostOfCapitalLoad(rate=0.1, q=0.9).premium(PAYOUT, measure),
             0.9 * expected + 0.1 * 12.0,
+        )
+
+    def test_premiums_on_the_event_basis_above_one_per_year(self) -> None:
+        # Frequencies 2.0, 0.6, 0.3 and 0.1 per year: the worst 0.25 per year of
+        # the payout is all of 0.1 at 12 and 0.15 of 0.3 at 5.
+        measure = EventBasis().measure([1, 2, 3, 4], [2.0, 0.6, 0.3, 0.1])
+        payout = [0.0, 1.0, 5.0, 12.0]
+        expected = 0.6 * 1.0 + 0.3 * 5.0 + 0.1 * 12.0
+        self.assertAlmostEqual(PurePremium().premium(payout, measure), expected)
+        cvar = (0.1 * 12.0 + 0.15 * 5.0) / 0.25
+        self.assertAlmostEqual(
+            CostOfCapitalLoad(rate=0.1, q=0.75).premium(payout, measure),
+            0.9 * expected + 0.1 * cvar,
+        )
+
+    def test_documents(self) -> None:
+        self.assertEqual(PurePremium().to_dict(), {"kind": "pure"})
+        self.assertEqual(
+            CostOfCapitalLoad(rate=0.06, q=0.99).to_dict(),
+            {"kind": "cost_of_capital", "q": 0.99, "rate": 0.06},
         )
 
     def test_invalid_parameters_raise(self) -> None:

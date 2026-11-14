@@ -18,8 +18,9 @@ with CLIMADA. If not, see <https://www.gnu.org/licenses/>.
 
 Pricing: the premium of a payout.
 
-Both pricings price the payout of one design problem (summed over its
-units), aggregated into outcomes: ``P_o = sum_{e in o} P_e``.
+Both pricings price a payout per event, aggregated into the outcomes of an
+:class:`~climada_petals.engine.parametric.measure.OutcomeMeasure`:
+``P_o = sum_{e in o} P_e``.
 
 * :class:`PurePremium`: ``E[P]``.
 * :class:`CostOfCapitalLoad`: ``(1 - r) E[P] + r CVaR_q(P)``. The load
@@ -29,15 +30,22 @@ units), aggregated into outcomes: ``P_o = sum_{e in o} P_e``.
   ``premium <= budget * E[L]`` keeps the design problem an LP (a QP with the
   mean squared error). ``r = 0`` is :class:`PurePremium`.
 
-A pricing is given once, to :func:`~climada_petals.engine.parametric.calibrate.calibrate`:
-the budget constrains it and the cover records the premium of its payout
-under it.
+On the annual basis the premium is that of a year's payout. On the event
+basis ``E[P]`` is the expected payout per year, ``sum_e f_e P_e``, and the
+CVaR is that of the worst ``1 - q`` of frequency per year
+(:mod:`~climada_petals.engine.parametric.riskmeasures`), whatever the
+frequencies sum to.
+
+The calibration prices its design with the pricing it is given, and the
+budget constrains that premium.
+:func:`~climada_petals.engine.parametric.evaluate.evaluate` prices a cover
+given as it is, and reprices a design, on the evaluation sample.
 """
 
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import ClassVar
+from typing import Any, ClassVar
 
 import numpy as np
 from numpy.typing import ArrayLike
@@ -61,16 +69,21 @@ class PurePremium:
         Parameters
         ----------
         payout : array_like of float
-            Per-event payout of the design problem, shape ``(n_events,)``.
+            Payout per row of the measure (an event, or an event and a
+            draw), summed over the units priced, shape ``(n_rows,)``.
         measure : OutcomeMeasure
-            Measure over the same events.
+            Measure over the same rows.
 
         Returns
         -------
         float
-            ``E[P]``, in the payout's unit.
+            ``E[P]``, in the payout's unit: per year on both bases.
         """
         return measure.expectation(payout)
+
+    def to_dict(self) -> dict[str, Any]:
+        """Return the pricing's document, ``{"kind": "pure"}``."""
+        return {"kind": self.name}
 
 
 @dataclass(frozen=True)
@@ -110,23 +123,29 @@ class CostOfCapitalLoad:
         Parameters
         ----------
         payout : array_like of float
-            Per-event payout of the design problem, shape ``(n_events,)``.
+            Payout per row of the measure (an event, or an event and a
+            draw), summed over the units priced, shape ``(n_rows,)``.
         measure : OutcomeMeasure
-            Measure over the same events.
+            Measure over the same rows.
 
         Returns
         -------
         float
             ``(1 - rate) E[P] + rate CVaR_q(P)`` over the measure's outcomes,
-            with the exact discrete CVaR.
+            with the exact discrete CVaR
+            (:func:`~climada_petals.engine.parametric.riskmeasures.var_cvar`).
         """
         values = np.asarray(payout, dtype=np.float64)
         expected = measure.expectation(values)
         if self.rate == 0.0:
             return expected
-        _, cvar = var_cvar(measure.aggregate(values), measure.probability, self.q)
+        _, cvar = var_cvar(measure.aggregate(values), measure.weights, self.q)
         return (1.0 - self.rate) * expected + self.rate * cvar
+
+    def to_dict(self) -> dict[str, Any]:
+        """Return the pricing's document, ``{"kind": "cost_of_capital", "q": ..., "rate": ...}``."""
+        return {"kind": self.name, "q": self.q, "rate": self.rate}
 
 
 Pricing = PurePremium | CostOfCapitalLoad
-"""The pricings :func:`~climada_petals.engine.parametric.calibrate.calibrate` accepts."""
+"""The pricings of the calibration and the evaluation."""
