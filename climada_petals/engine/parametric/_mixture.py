@@ -64,9 +64,22 @@ a mixture keeps them apart:
   (its id where the member has no names).
 * **Blocks** are the members' own, labelled ``"<i>:<block>"``: the given
   labels (an ensemble's parent storm, say), else the year on catalogue
-  years and the event id on the other routes.
+  years and the event id on the other routes. So the same storm in two
+  members, such as two windows of a pathway, counts as two blocks.
 * **Draws**: the members have the same number of draws, and the rows are
   ordered by draw, then event, as in any sample.
+
+**Splits.** On an annual route a split of a mixture would not mix its
+members' sides: on year sets each side would sample its years from the
+pooled frequencies of every member, and on catalogue years each member
+would weigh by its number of years on the side. So the mixture's bases
+(:attr:`MixtureYears.split_refusal`, :attr:`MixtureCatalogue.split_refusal`)
+make ``holdout``, ``year_block_kfold`` and ``select`` raise
+:class:`~climada_petals.engine.parametric.errors.ScenarioError`;
+:meth:`~climada_petals.engine.parametric.scenarios.ScenarioSet.holdout`
+splits the members instead. On the event basis a mixture is one set of
+events with frequencies, and splits it as any other: each side keeps its
+events, with their frequencies divided by the side's share.
 
 :func:`scenario_members` checks a set's samples before any mixture is
 built: every sample of a set has the same basis and route, unit ids and
@@ -80,7 +93,7 @@ from __future__ import annotations
 import dataclasses
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
-from typing import Any
+from typing import Any, ClassVar, Final
 
 import numpy as np
 import pandas as pd
@@ -107,6 +120,7 @@ from .sample import OutcomeSample
 from .units import InsuredUnits
 
 __all__ = [
+    "SPLIT_REFUSAL",
     "MixtureCatalogue",
     "MixtureYears",
     "as_sequence",
@@ -119,6 +133,16 @@ __all__ = [
 
 _FREQUENCY_RTOL = 1e-9
 """Relative tolerance of a sample's frequencies against the year sets'."""
+
+SPLIT_REFUSAL: Final[str] = (
+    "this sample mixes the members of a scenario on an annual route, and a split "
+    "of it would not mix the members' sides: on year sets each side would sample "
+    "its years from the pooled frequencies of every member, so a year would hold "
+    "the events of several members, and on catalogue years each member would "
+    "weigh by its number of years on the side. Split the members instead: "
+    "ScenarioSet.holdout splits each member and mixes their sides"
+)
+"""Why ``holdout``, ``year_block_kfold`` and ``select`` refuse a mixture on an annual route."""
 
 
 def where(label: str, position: int, size: int) -> str:
@@ -374,6 +398,7 @@ class MixtureYears(YearSets):
     """
 
     year_weight: NDArray[np.float64] | None = field(default=None, kw_only=True)
+    split_refusal: ClassVar[str] = SPLIT_REFUSAL
 
     def __post_init__(self) -> None:
         """Validate the years as year sets do, and the weights."""
@@ -469,6 +494,7 @@ class MixtureCatalogue(CatalogueYears):
     """
 
     year_weight: NDArray[np.float64] | None = field(default=None, kw_only=True)
+    split_refusal: ClassVar[str] = SPLIT_REFUSAL
 
     def __post_init__(self) -> None:
         """Validate the labels as catalogue years do, and the weights."""

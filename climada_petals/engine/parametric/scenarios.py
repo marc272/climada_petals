@@ -110,10 +110,13 @@ index definition, and so every table, is the same for both.
 Splits and leakage
 ------------------
 Split the members, not a mixture: :meth:`ScenarioSet.holdout` splits each
-member and returns a training and a test set with the same labels. A
-mixture's years on year sets are its members' years; ``holdout`` of the
-mixture itself would sample each side's years from the pooled frequencies
-of all members, so that one year mixes the events of every member.
+member and returns a training and a test set with the same labels. On an
+annual route a split of the mixture itself would not mix the members'
+sides (on year sets, one year would hold the events of several members),
+so ``holdout``, ``year_block_kfold`` and ``select`` raise
+:class:`~climada_petals.engine.parametric.errors.ScenarioError` on it. On
+the event basis a mixture is one set of events, which they split as any
+other.
 
 :func:`evaluate_scenarios` checks an out-of-sample evaluation of a design
 for leakage as :func:`~climada_petals.engine.parametric.evaluate.evaluate`
@@ -121,7 +124,8 @@ does: against every sample, or member of a mixture, that was cut from
 another; and a design on a mixture against the mixture of its scenario's
 other sides. The members of a mixture are different hazard sets, whose
 event ids and blocks say nothing about each other, so the mixture keeps
-them apart (:mod:`~climada_petals.engine.parametric._mixture`).
+them apart (:mod:`~climada_petals.engine.parametric._mixture`): the same
+storm in two members counts as two blocks.
 
 A set scaled by ``apply_climate_scenario_knu`` holds its baseline's events:
 a design calibrated on the baseline has seen every footprint of it, and its

@@ -483,13 +483,13 @@ class TestMixtures(unittest.TestCase):
         # Years' losses 8 (1/4) and 6 (1/8) lead: the worst 0.3 is 8 and 6.
         self.assertAlmostEqual(row["cvar_loss_b0_7"], (8 / 4 + 6 * 0.05) / 0.3)
         self.assertEqual(row["n_years"], 6)
-        train, test = holdout(mixture, train_fraction=0.5)
-        np.testing.assert_array_equal(train.years, [0, 1, 2])
-        np.testing.assert_allclose(train.measure.weights, [0.25, 0.5, 0.25])
-        self.assertAlmostEqual(
-            train.measure.expectation(train.loss.toarray()[:, 0]), 2.0
+        # On the first three years (events of years 0 and 1), the weights
+        # 1/8, 1/4 and 1/8 divided by their sum.
+        part = basis.measure(
+            mixture.event_id[[0, 2]], mixture.frequency[[0, 2]], years=[0, 1, 2]
         )
-        self.assertEqual(test.n_years, 3)
+        np.testing.assert_allclose(part.weights, [0.25, 0.5, 0.25])
+        self.assertAlmostEqual(part.expectation(mixture.loss.toarray()[[0, 2], 0]), 2.0)
 
     def test_the_mixture_classes_check_their_inputs(self) -> None:
         with self.assertRaisesRegex(ParametricInputError, "one weight per year"):
@@ -588,6 +588,98 @@ class TestMixtures(unittest.TestCase):
             outer.measure.expectation(outer.loss.toarray()[:, 0]), sum(losses) / 2
         )
         self.assertAlmostEqual(float(outer.basis.year_weight.sum()), 1.0)
+
+
+class TestSplitsOfMixtures(unittest.TestCase):
+    """A split of a mixture on an annual route raises; its members' splits work."""
+
+    def setUp(self) -> None:
+        self.on_years = ScenarioSet(
+            {
+                "w": [
+                    _sample(FIRST, _years([[0], [], [0, 1], [1]])),
+                    _sample(SECOND, _years([[1], [0], [2, 0]])),
+                ]
+            }
+        )
+        self.on_catalogue = ScenarioSet(
+            {
+                "w": [
+                    _sample(
+                        (FIRST[0], FIRST[1], [0.25, 0.25]),
+                        lambda imp: CatalogueYears.from_labels(
+                            imp.event_id, [0, 2], n_years=4
+                        ),
+                    ),
+                    _sample(
+                        (SECOND[0], SECOND[1], [0.25] * 3),
+                        lambda imp: CatalogueYears.from_labels(
+                            imp.event_id, [0, 1, 3], n_years=4
+                        ),
+                    ),
+                ]
+            }
+        )
+
+    def test_splits_of_an_annual_mixture_raise(self) -> None:
+        on_years = self.on_years.sample("w")
+        on_catalogue = self.on_catalogue.sample("w")
+        rng = np.random.default_rng(14)
+        calls = {
+            "holdout, year sets": lambda: holdout(on_years, rng=rng),
+            "folds, year sets": lambda: year_block_kfold(on_years, 2, rng=rng),
+            "select, year sets": lambda: on_years.select(on_years.block[:1], rng=rng),
+            "holdout, catalogue": lambda: holdout(on_catalogue, train_fraction=0.5),
+            "folds, catalogue": lambda: year_block_kfold(on_catalogue, 2),
+            "select, catalogue": lambda: on_catalogue.select([0, 1, 2]),
+        }
+        for name, call in calls.items():
+            with (
+                self.subTest(name),
+                self.assertRaisesRegex(
+                    ScenarioError, "ScenarioSet.holdout splits each member"
+                ),
+            ):
+                call()
+
+    def test_the_members_split_instead(self) -> None:
+        train, test = self.on_catalogue.holdout(train_fraction=0.5)
+        sides = train.members["w"]
+        np.testing.assert_array_equal(sides[0].years, [0, 1])
+        np.testing.assert_array_equal(sides[1].years, [0, 1])
+        # Each member's two training years weigh 1/4 in the mixture.
+        np.testing.assert_allclose(train.sample("w").basis.year_weight, [0.25] * 4)
+        self.assertEqual(test.sample("w").n_years, 4)
+        on_years = ScenarioSet(
+            {"w": [_year_sets_sample(21, 100), _year_sets_sample(22, 100)]}
+        )
+        train, test = on_years.holdout(rng=np.random.default_rng(15))
+        self.assertEqual(
+            train.sample("w").n_years,
+            sum(side.n_years for side in train.members["w"]),
+        )
+        nested = ScenarioSet(
+            {"out": [on_years.sample("w"), _year_sets_sample(23, 100)]}
+        )
+        with self.assertRaises(ScenarioError) as found:
+            nested.holdout(rng=np.random.default_rng(16))
+        self.assertIn(
+            "raised by ScenarioSet.holdout at scenario 'out', member 0",
+            found.exception.__notes__,
+        )
+
+    def test_a_mixture_on_the_event_basis_splits_as_any_event_set(self) -> None:
+        mixture = ScenarioSet({"w": [_sample(FIRST), _sample(SECOND)]}).sample("w")
+        train, test = holdout(mixture, rng=np.random.default_rng(17))
+        self.assertEqual(train.n_events + test.n_events, mixture.n_events)
+        share = train.split.share
+        rows = pd.Index(mixture.event_id).get_indexer(train.event_id)
+        np.testing.assert_allclose(train.frequency, mixture.frequency[rows] / share)
+        part = mixture.select(mixture.block[:2])
+        self.assertEqual(part.n_events, 2)
+        self.assertEqual(
+            len(year_block_kfold(mixture, 2, rng=np.random.default_rng(18))), 2
+        )
 
 
 def units_definition() -> IndexDefinition:
