@@ -177,10 +177,10 @@ def objectives(result: CalibrationResult) -> NDArray[np.float64]:
     by_problem = {
         problem.problem_id: problem.objective_value for problem in result.problems
     }
-    return np.array([by_problem[unit] for unit in result.cover.unit_id]) * N_YEARS
+    return np.array([by_problem[str(unit)] for unit in result.cover.unit_id]) * N_YEARS
 
 
-def single_subarea(*polygons: Any, values: Any = None) -> Subareas:
+def subareas_of(*polygons: Any, values: Any = None) -> Subareas:
     """Return ``Subareas`` with the given polygons on :func:`flood_case`'s points."""
     case = flood_case()
     exposures = case.exposures.copy()
@@ -237,7 +237,7 @@ class TestUnitsFromSubareas(unittest.TestCase):
         # Subarea A leaves out its northern row, two points; cat_bonds'
         # from_geodataframe accepts it.
         short = box(19.95, 9.95, 20.15, 10.15)
-        subareas = single_subarea(short, SUBAREAS[1])
+        subareas = subareas_of(short, SUBAREAS[1])
         with (
             self.assertLogs(LOGGER, "WARNING"),
             self.assertRaisesRegex(UnitMappingError, "2 exposure points of positive"),
@@ -247,7 +247,7 @@ class TestUnitsFromSubareas(unittest.TestCase):
         values[[8, 9]] = 0.0
         with self.assertLogs(LOGGER, "WARNING") as logs:
             units = InsuredUnits.from_subareas(
-                single_subarea(short, SUBAREAS[1], values=values)
+                subareas_of(short, SUBAREAS[1], values=values)
             )
         self.assertIn("2 of 12 exposure points are in no insured unit", logs.output[0])
         np.testing.assert_array_equal(units.point_unit[8:], [-1, -1, 1, 1])
@@ -265,7 +265,7 @@ class TestUnitsFromSubareas(unittest.TestCase):
                 self.subTest(match=match),
                 self.assertRaisesRegex(UnitMappingError, match),
             ):
-                InsuredUnits.from_subareas(single_subarea(*polygons))
+                InsuredUnits.from_subareas(subareas_of(*polygons))
         subareas = flood_case().subareas
         subareas.subareas_gdf = subareas.subareas_gdf.drop(columns="subarea_letter")
         with self.assertRaisesRegex(UnitMappingError, "subarea_letter"):
