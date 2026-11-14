@@ -36,7 +36,8 @@ the objective by its value for the zero cover, the budget row by ``E[L]``.
   ``sum_o lambda_o w_o P_o`` over the tail weights ``lambda`` of the
   outcomes (:func:`~climada_petals.engine.parametric.riskmeasures.tail_weights`).
   Each round solves the QP with the cuts so far and adds the linear piece
-  of the premium at its solution, a cut, until the premium meets the budget
+  of the premium at its solution, a cut (Kelley's cutting-plane method,
+  on the budget constraint alone), until the premium meets the budget
   within ``feasibility_tolerance``, relative to the larger of the bound and
   ``E[L]``. The first round's cut is the piece at the lower bounds. A cut
   never removes a design whose premium meets the budget, so the rounds
@@ -68,6 +69,12 @@ reached by a row with a weight) is unique exactly when the Hessian
 ``2 A_I^T W A_I`` restricted to them is positive definite. The route
 reports it as unique when the smallest eigenvalue is above
 :data:`UNIQUE_RTOL` times the largest.
+
+References
+----------
+* Kelley, J. E., Jr. (1960). The cutting-plane method for solving convex
+  programs. Journal of the Society for Industrial and Applied Mathematics,
+  8(4), 703-712. https://doi.org/10.1137/0108053
 """
 
 from __future__ import annotations
@@ -439,7 +446,7 @@ def solve_mse(
         method="slsqp",
         status="0" if last is None else str(last.status),
         message="no amount to solve for" if last is None else str(last.message),
-        iterations=sum(int(item.nit) for item in results),
+        iterations=sum(int(result.nit) for result in results),
         seconds=time.perf_counter() - start,
         rounds=len(results),
     )

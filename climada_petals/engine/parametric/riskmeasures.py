@@ -150,8 +150,10 @@ def var_cvar(values: ArrayLike, weights: ArrayLike, beta: float) -> tuple[float,
 
     Returns
     -------
-    var, cvar : float
-        ``VaR_beta`` and the Rockafellar-Uryasev ``CVaR_beta``.
+    var : float
+        ``VaR_beta``.
+    cvar : float
+        The Rockafellar-Uryasev ``CVaR_beta``.
 
     Raises
     ------

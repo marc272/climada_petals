@@ -182,15 +182,50 @@ class InfeasibleCalibrationError(CalibrationError):
     """The solver found no amounts that meet every constraint.
 
     For example, fixed amounts whose premium is above the budget.
+
+    Parameters
+    ----------
+    message : str
+        What went wrong.
+    problem_id : str
+        The design problem: a unit id, or ``"joint"``.
+    status : str, optional
+        The solver's status, if it returned one.
+    solver_message : str, optional
+        The solver's own message, if it returned one.
     """
 
 
 class UnboundedCalibrationError(CalibrationError):
-    """The solver found the objective unbounded below."""
+    """The solver found the objective unbounded below.
+
+    Parameters
+    ----------
+    message : str
+        What went wrong.
+    problem_id : str
+        The design problem: a unit id, or ``"joint"``.
+    status : str, optional
+        The solver's status, if it returned one.
+    solver_message : str, optional
+        The solver's own message, if it returned one.
+    """
 
 
 class CalibrationLimitError(CalibrationError):
-    """A stated limit of the calibration was reached, such as ``time_limit``."""
+    """A stated limit of the calibration was reached, such as ``time_limit``.
+
+    Parameters
+    ----------
+    message : str
+        What went wrong.
+    problem_id : str
+        The design problem: a unit id, or ``"joint"``.
+    status : str, optional
+        The solver's status, if it returned one.
+    solver_message : str, optional
+        The solver's own message, if it returned one.
+    """
 
 
 class MissingDependencyError(ParametricError, ImportError):

@@ -153,6 +153,7 @@ def plot_payout(
     Returns
     -------
     matplotlib.axes.Axes
+        The axes drawn on: the index on x, the payout on y.
 
     Raises
     ------
@@ -208,6 +209,8 @@ def plot_payout_vs_loss(
     Returns
     -------
     matplotlib.axes.Axes
+        The axes drawn on: the loss on x, the payout on y, and the line
+        ``payout = loss``.
 
     Raises
     ------
@@ -319,9 +322,9 @@ def plot_exceedance(
     elif isinstance(source, Impact):
         curves = [_impact_curve(source.unit or "impact", source)]
     elif isinstance(source, Mapping) and all(
-        isinstance(item, Impact) for item in source.values()
+        isinstance(impact, Impact) for impact in source.values()
     ):
-        curves = [_impact_curve(str(name), item) for name, item in source.items()]
+        curves = [_impact_curve(str(name), impact) for name, impact in source.items()]
     else:
         raise ParametricInputError(
             "source must be an Impact, a mapping of labels to Impacts, or a table of "

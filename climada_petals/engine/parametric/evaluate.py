@@ -833,6 +833,8 @@ def payout_impact(
     Returns
     -------
     climada.engine.Impact
+        The payouts per event and exposure point, in the cover's
+        ``payout_unit``.
 
     Raises
     ------
@@ -896,9 +898,13 @@ def uncovered_impact(
 
     Parameters
     ----------
-    entry, sample, impact
+    entry : ParametricCover or CalibrationResult
+        As in :func:`payout_impact`.
+    sample : OutcomeSample
+        As in :func:`payout_impact`.
+    impact : climada.engine.Impact, optional
         As in :func:`payout_impact`. On a sample with impact-function
-        draws, ``impact`` is the given draw's loss ``Impact``.
+        draws, the given draw's loss ``Impact``.
     draw : int, optional
         On a sample with impact-function draws, the draw whose uncovered
         losses to return, from 0; its events have their own frequencies.
@@ -907,6 +913,8 @@ def uncovered_impact(
     Returns
     -------
     climada.engine.Impact
+        The uncovered losses per event and exposure point, in the
+        cover's ``payout_unit``.
 
     Raises
     ------

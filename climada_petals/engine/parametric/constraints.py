@@ -220,7 +220,14 @@ class Budget:
         return float(self.amount or 0.0)
 
     def to_dict(self) -> dict[str, Any]:
-        """Return ``{"ratio": kappa}`` or ``{"amount": ...}``, keyed by ``str(unit)``."""
+        """Return the budget's document.
+
+        Returns
+        -------
+        dict
+            ``{"ratio": kappa}`` or ``{"amount": ...}``; a mapping of amounts
+            is keyed by ``str(unit)``.
+        """
         if self.ratio is not None:
             return {"ratio": self.ratio}
         if isinstance(self.amount, Mapping):

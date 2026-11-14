@@ -375,7 +375,11 @@ class OutcomeSample:
             units' exposure points, with the index's events in any order and
             the same frequencies and loss unit, e.g. one ``ImpactCalc`` per
             set of ``impact_function_draws``.
-        units, basis, scenario
+        units : InsuredUnits
+            As in :meth:`from_impact`.
+        basis : EventBasis, CatalogueYears or YearSets
+            As in :meth:`from_impact`.
+        scenario : str, default "baseline"
             As in :meth:`from_impact`.
 
         Returns
@@ -606,9 +610,10 @@ def holdout(
 
     Returns
     -------
-    train, test : OutcomeSample
-        Disjoint in events and blocks; ``split`` records the side and its
-        share.
+    train : OutcomeSample
+        The training side; ``split`` records the side and its share.
+    test : OutcomeSample
+        The test side, disjoint from ``train`` in events and blocks.
 
     Raises
     ------

@@ -160,12 +160,23 @@ class CatalogueYears:
 
         Parameters
         ----------
-        event_id, year, n_years, first_year, block
-            As the class's.
+        event_id : array_like of int
+            The labelled events, unique.
+        year : array_like of int
+            Each event's simulation year.
+        n_years : int
+            ``N``, the number of simulation years, including years without
+            events.
+        first_year : int, default 0
+            The first simulation year.
+        block : array_like, optional
+            One label per event, the unit a split keeps together. Default:
+            the year.
 
         Returns
         -------
         CatalogueYears
+            With ``source="labels"``.
         """
         return cls(
             np.asarray(event_id),
@@ -357,6 +368,16 @@ class CatalogueYears:
     def year_of(self, event_id: ArrayLike) -> NDArray[np.int64]:
         """Return the year of each given event.
 
+        Parameters
+        ----------
+        event_id : array_like of int
+            Events of the catalogue years.
+
+        Returns
+        -------
+        numpy.ndarray
+            Each event's simulation year, read-only.
+
         Raises
         ------
         EventAlignmentError
@@ -367,6 +388,17 @@ class CatalogueYears:
 
     def blocks(self, event_id: ArrayLike) -> NDArray[Any]:
         """Return the block of each given event: its label, or its year.
+
+        Parameters
+        ----------
+        event_id : array_like of int
+            Events of the catalogue years.
+
+        Returns
+        -------
+        numpy.ndarray
+            Each event's block, read-only: its ``block`` label, or its year
+            if the catalogue years have no labels.
 
         Raises
         ------
@@ -405,6 +437,9 @@ class CatalogueYears:
         Returns
         -------
         OutcomeMeasure
+            On the annual basis: one outcome per year and draw, of weight
+            ``1 / (len(years) n_draws)``, with the years without events
+            pooled into one last outcome.
 
         Raises
         ------
@@ -446,6 +481,16 @@ class CatalogueYears:
 
     def check_years(self, years: ArrayLike) -> NDArray[np.int64]:
         """Return ``years`` sorted, checked against :attr:`years`.
+
+        Parameters
+        ----------
+        years : array_like of int
+            Simulation years, e.g. a block of a split.
+
+        Returns
+        -------
+        numpy.ndarray
+            The years, sorted.
 
         Raises
         ------
@@ -632,6 +677,17 @@ class YearSets:
     def blocks(self, event_id: ArrayLike) -> NDArray[Any]:
         """Return the block of each given event: its label, or the event.
 
+        Parameters
+        ----------
+        event_id : array_like of int
+            Events of the year sets.
+
+        Returns
+        -------
+        numpy.ndarray
+            Each event's block, read-only: its ``block`` label, or its event
+            id if the year sets have no labels.
+
         Raises
         ------
         EventAlignmentError
@@ -662,6 +718,10 @@ class YearSets:
         Returns
         -------
         OutcomeMeasure
+            On the annual basis: one outcome per sampled year and draw, of
+            weight ``1 / (N n_draws)``, holding the given events sampled into
+            that year; the years without them are pooled into one last
+            outcome.
 
         Raises
         ------

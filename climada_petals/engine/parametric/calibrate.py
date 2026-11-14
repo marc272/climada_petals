@@ -403,7 +403,8 @@ class CalibrationResult:
     def __reduce__(self) -> tuple[Any, ...]:
         """Pickle and copy through the constructor, with the mappings as dicts."""
         fields = {
-            item.name: getattr(self, item.name) for item in dataclasses.fields(self)
+            field_def.name: getattr(self, field_def.name)
+            for field_def in dataclasses.fields(self)
         }
         fields["calibrated"] = dict(self.calibrated)
         fields["unidentified"] = dict(self.unidentified)
@@ -453,10 +454,10 @@ class CalibrationResult:
         problem was ranged.
         """
         found = [problem.ranges for problem in self.problems]
-        if all(item is None for item in found):
+        if all(ranges is None for ranges in found):
             return None
         out: dict[Hashable, dict[str, tuple[float, float]]] = {}
-        for unit, name, low, high in (row for item in found for row in item or ()):
+        for unit, name, low, high in (row for ranges in found for row in ranges or ()):
             out.setdefault(unit, {})[name] = (low, high)
         return out
 
@@ -709,10 +710,10 @@ def _design(setup: Setup, diagnostics: pd.DataFrame) -> CalibrationResult:
     cover = resolved_design(setup, units, solved)
     sample = setup.sample
     paid = cover.payout_matrix(sample.index)[sample.event_row]
-    problems = tuple(record(setup, item, paid, cover) for item in solved)
+    problems = tuple(record(setup, done, paid, cover) for done in solved)
     flags = [problem.unique for problem in problems]
     ties = [problem.ties for problem in problems if problem.ties is not None]
-    profiles = [item.grid.profile for item in solved if item.grid is not None]
+    profiles = [done.grid.profile for done in solved if done.grid is not None]
     return CalibrationResult(
         cover=cover,
         template_hash=setup.template.definition_hash,

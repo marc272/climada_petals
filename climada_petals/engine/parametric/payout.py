@@ -74,9 +74,7 @@ solvers need. The four families implement both.
 from __future__ import annotations
 
 import abc
-import dataclasses
 import inspect
-import math
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 from typing import Any, ClassVar, Final, Literal, TypeVar, get_args
@@ -85,9 +83,26 @@ import numpy as np
 import scipy.sparse as sp
 from numpy.typing import ArrayLike, NDArray
 
+from ._payout_basis import (
+    amount_bounds,
+    binary_basis,
+    fixed_amounts,
+    fixed_thresholds,
+    index_values,
+    piecewise_basis,
+    severity_1d,
+    step_basis,
+)
+from ._payout_fields import (
+    field_document,
+    field_parameters,
+    payout_from_fields,
+    store_fields,
+    store_levels,
+    with_field_values,
+)
 from .errors import (
     CoverDefinitionError,
-    ParametricInputError,
     UnknownPayoutKindError,
     UnresolvedParameterError,
 )
@@ -96,18 +111,8 @@ from .parameters import (
     Free,
     Parameter,
     amount_parameter,
-    check_flag,
-    check_lengths,
-    check_monotone,
     check_order,
-    constructor_fields,
-    field_from_document,
-    field_to_document,
-    is_parameter,
-    non_negative,
-    parameter_tuple,
     real_number,
-    required_field,
     shape_parameter,
 )
 
@@ -199,18 +204,18 @@ class PayoutFunction(abc.ABC):
             For example ``{"breakpoints[0]": 25.0, ..., "levels[0]":
             Free(), ...}``.
         """
-        out: dict[str, Parameter] = {}
-        for item in constructor_fields(self):
-            value = getattr(self, item.name)
-            if is_parameter(value):
-                out[item.name] = value
-            elif isinstance(value, tuple) and all(is_parameter(v) for v in value):
-                for position, entry in enumerate(value):
-                    out[f"{item.name}[{position}]"] = entry
-        return out
+        return field_parameters(self)
 
     def free_parameters(self) -> tuple[str, ...]:
-        """Return the names of the free parameters, in parameter order."""
+        """Return the names of the free parameters, in parameter order.
+
+        Returns
+        -------
+        tuple of str
+            The names in :meth:`parameters` whose value is
+            :class:`~climada_petals.engine.parametric.parameters.Free`; empty
+            when the payout is resolved.
+        """
         return tuple(
             name for name, value in self.parameters().items() if isinstance(value, Free)
         )
@@ -257,32 +262,7 @@ class PayoutFunction(abc.ABC):
             not a finite number, or the new payout is invalid (thresholds
             out of order, levels not monotone).
         """
-        if not isinstance(values, Mapping):
-            raise CoverDefinitionError(
-                f"values must map parameter names to numbers, got {values!r}"
-            )
-        current = self.parameters()
-        changes: dict[str, Any] = {}
-        for name, value in values.items():
-            parameter = current.get(name)
-            if not isinstance(parameter, Free):
-                raise CoverDefinitionError(
-                    f"{name!r} is not a free parameter of the {self.kind} payout; its "
-                    f"free parameters are {list(self.free_parameters())}"
-                )
-            number = parameter.check(name, value)
-            field_name, _, position = name.partition("[")
-            if position:
-                entries = changes.setdefault(
-                    field_name, list(getattr(self, field_name))
-                )
-                entries[int(position[:-1])] = number
-            else:
-                changes[field_name] = number
-        for field_name, change in changes.items():
-            if isinstance(change, list):
-                changes[field_name] = tuple(change)
-        return dataclasses.replace(self, **changes)
+        return with_field_values(self, values)
 
     def to_dict(self) -> dict[str, Any]:
         """Return the payout's document: ``kind`` and every field.
@@ -293,10 +273,7 @@ class PayoutFunction(abc.ABC):
             JSON-ready. A fixed parameter is a number, a free one
             ``{"free": {...}}``, a tuple a list.
         """
-        document: dict[str, Any] = {"kind": self.kind}
-        for item in constructor_fields(self):
-            document[item.name] = field_to_document(getattr(self, item.name), item.name)
-        return document
+        return field_document(self)
 
     @classmethod
     def from_dict(cls: type[_P], document: Mapping[str, Any]) -> _P:
@@ -317,25 +294,7 @@ class PayoutFunction(abc.ABC):
             If the kind is not this family's, a key is unknown or missing,
             or a value is invalid.
         """
-        if not isinstance(document, Mapping) or document.get("kind") != cls.kind:
-            raise CoverDefinitionError(
-                f"a {cls.__name__} document has kind {cls.kind!r}, got {document!r}"
-            )
-        items = {item.name: item for item in constructor_fields(cls)}
-        unknown = set(document) - set(items) - {"kind"}
-        missing = {name for name, item in items.items() if required_field(item)}
-        missing -= set(document)
-        if unknown or missing:
-            raise CoverDefinitionError(
-                f"a {cls.kind} payout document has unknown keys {sorted(unknown)} "
-                f"and misses {sorted(missing)}"
-            )
-        kwargs = {
-            name: field_from_document(document[name])
-            for name in items
-            if name in document
-        }
-        return cls(**kwargs)
+        return payout_from_fields(cls, document)
 
     def severity(self, index: ArrayLike) -> NDArray[np.float64]:
         """Return the severity of index values: ``x`` (upper) or ``-x`` (lower).
@@ -343,12 +302,22 @@ class PayoutFunction(abc.ABC):
         The values are converted to float, so an integer index is not
         truncated.
 
+        Parameters
+        ----------
+        index : array_like of float
+            Index values, any shape. Finite.
+
+        Returns
+        -------
+        numpy.ndarray
+            The severities, of the same shape as ``index``.
+
         Raises
         ------
         ParametricInputError
             If a value is not numeric or not finite.
         """
-        values = _index_values(index)
+        values = index_values(index)
         return -values if self.tail == "lower" else values
 
 
@@ -365,7 +334,14 @@ class LinearInAmounts(PayoutFunction):
 
     @abc.abstractmethod
     def amount_names(self) -> tuple[str, ...]:
-        """Return the names of the amounts, in the order of the basis columns."""
+        """Return the names of the amounts, in the order of the basis columns.
+
+        Returns
+        -------
+        tuple of str
+            Parameter names (:meth:`PayoutFunction.parameters`), one per
+            column of :meth:`basis`.
+        """
 
     @abc.abstractmethod
     def basis(self, index: ArrayLike) -> sp.csr_matrix:
@@ -393,30 +369,37 @@ class LinearInAmounts(PayoutFunction):
         """
 
     def amounts(self) -> NDArray[np.float64]:
-        """Return the amounts, shape ``(n_amounts,)``, in :meth:`amount_names` order.
+        """Return the amounts, in :meth:`amount_names` order.
+
+        Returns
+        -------
+        numpy.ndarray
+            Shape ``(n_amounts,)``, in payout units.
 
         Raises
         ------
         UnresolvedParameterError
             If an amount is free.
         """
-        parameters = self.parameters()
-        names = self.amount_names()
-        free = [name for name in names if isinstance(parameters[name], Free)]
-        if free:
-            raise UnresolvedParameterError(
-                f"the {self.kind} payout has free amounts {free}: resolve them with "
-                "with_values, or calibrate the cover"
-            )
-        return np.array([parameters[name] for name in names], dtype=np.float64)
+        return fixed_amounts(self)
 
     def evaluate(self, index: ArrayLike) -> NDArray[np.float64]:
         """Return ``basis(index) @ amounts``, in the shape of ``index``.
 
-        See :meth:`PayoutFunction.evaluate`.
+        It raises as :meth:`PayoutFunction.evaluate` does.
+
+        Parameters
+        ----------
+        index : array_like of float
+            Index values, any shape. Finite.
+
+        Returns
+        -------
+        numpy.ndarray
+            The payouts, in payout units, of the same shape as ``index``.
         """
         self.check_resolved()
-        values = _index_values(index)
+        values = index_values(index)
         paid = self.basis(values.reshape(-1)) @ self.amounts()
         return np.asarray(paid, dtype=np.float64).reshape(values.shape)
 
@@ -445,19 +428,7 @@ class LinearInAmounts(PayoutFunction):
         CoverDefinitionError
             If ``limit`` is not a finite number >= 0.
         """
-        cap = math.inf if limit is None else non_negative("limit", limit)
-        parameters = self.parameters()
-        lower: list[float] = []
-        upper: list[float] = []
-        for name in self.amount_names():
-            value = parameters[name]
-            if isinstance(value, Free):
-                lower.append(value.lower)
-                upper.append(min(cap, math.inf if value.upper is None else value.upper))
-            else:
-                lower.append(value)
-                upper.append(min(value, cap))
-        return AmountConstraints(np.array(lower), np.array(upper))
+        return amount_bounds(self, limit)
 
 
 def register_payout(cls: type[_P]) -> type[_P]:
@@ -520,6 +491,7 @@ def payout_from_dict(document: Mapping[str, Any]) -> PayoutFunction:
     Returns
     -------
     PayoutFunction
+        A payout of the family registered for the document's ``kind``.
 
     Raises
     ------
@@ -592,19 +564,7 @@ class StepPayout(LinearInAmounts):
 
     def __post_init__(self) -> None:
         """Validate the parameters and store them as tuples of floats or Free."""
-        tail = check_tail(self.tail)
-        breakpoints = parameter_tuple(
-            "breakpoints", self.breakpoints, shape_parameter, 1
-        )
-        check_order("breakpoints", breakpoints, tail)
-        levels = parameter_tuple("levels", self.levels, amount_parameter, 1)
-        check_lengths(("breakpoints", breakpoints), ("levels", levels))
-        monotone = check_flag("monotone", self.monotone)
-        if monotone:
-            check_monotone("levels", levels)
-        _store(
-            self, tail=tail, breakpoints=breakpoints, levels=levels, monotone=monotone
-        )
+        store_levels(self, check_tail(self.tail), "breakpoints", 1)
 
     @classmethod
     def uniform(
@@ -674,27 +634,47 @@ class StepPayout(LinearInAmounts):
         return len(self.breakpoints)
 
     def amount_names(self) -> tuple[str, ...]:
-        """Return ``("levels[0]", ..., "levels[n-1]")``."""
+        """Return the names of the amounts: the levels.
+
+        Returns
+        -------
+        tuple of str
+            ``("levels[0]", ..., "levels[n-1]")``.
+        """
         return tuple(f"levels[{k}]" for k in range(self.n_steps))
 
     def basis(self, index: ArrayLike) -> sp.csr_matrix:
         """Return the one-hot step of each value (:meth:`LinearInAmounts.basis`).
 
         A row is empty where the index is below the first breakpoint.
+
+        Parameters
+        ----------
+        index : array_like of float
+            Index values of one unit, shape ``(n_events,)``. Finite.
+
+        Returns
+        -------
+        scipy.sparse.csr_matrix
+            Shape ``(n_events, n_steps)``, with a 1 in the column of each
+            value's step.
         """
-        thresholds = _shape(self, "breakpoints", self.breakpoints)
-        severity = _severity_1d(self, index)
-        step = np.searchsorted(thresholds, severity, side="right") - 1
-        rows = np.flatnonzero(step >= 0)
-        return sp.csr_matrix(
-            (np.ones(rows.size), (rows, step[rows])),
-            shape=(severity.size, self.n_steps),
-        )
+        thresholds = fixed_thresholds(self, "breakpoints", self.breakpoints)
+        return step_basis(thresholds, severity_1d(self, index))
 
     def amount_constraints(self, limit: float | None = None) -> AmountConstraints:
         """Return the bounds, and ``theta_k <= theta_{k+1}`` if monotone.
 
-        See :meth:`LinearInAmounts.amount_constraints`.
+        Parameters
+        ----------
+        limit : float, optional
+            As in :meth:`LinearInAmounts.amount_constraints`.
+
+        Returns
+        -------
+        AmountConstraints
+            The bounds of :meth:`LinearInAmounts.amount_constraints`, with a
+            row per pair of adjacent levels if the payout is monotone.
         """
         constraints = super().amount_constraints(limit)
         return constraints.with_monotone_rows() if self.monotone else constraints
@@ -747,7 +727,7 @@ class LinearPayout(LinearInAmounts):
         exhaustion = shape_parameter("exhaustion", self.exhaustion)
         check_order("attachment and exhaustion", (attachment, exhaustion), tail)
         limit = amount_parameter("limit", self.limit)
-        _store(
+        store_fields(
             self, tail=tail, attachment=attachment, exhaustion=exhaustion, limit=limit
         )
 
@@ -768,22 +748,55 @@ class LinearPayout(LinearInAmounts):
         integer-typed index, and this payout does not. ``cat_bonds``'
         ``attachment_point`` and ``exhaustion_point`` are levels of loss,
         not these.
+
+        Parameters
+        ----------
+        min_trig : float or Free
+            The attachment, in index units.
+        max_trig : float or Free
+            The exhaustion, in index units.
+        max_pay : float or Free
+            The limit, in payout units.
+        tail : {"upper", "lower"}, default "upper"
+            As in the class.
+
+        Returns
+        -------
+        LinearPayout
+            The payout, checked as the class checks it.
         """
         return cls(min_trig, max_trig, max_pay, tail=tail)
 
     def amount_names(self) -> tuple[str, ...]:
-        """Return ``("limit",)``."""
+        """Return the names of the amounts: the limit.
+
+        Returns
+        -------
+        tuple of str
+            ``("limit",)``.
+        """
         return ("limit",)
 
     def basis(self, index: ArrayLike) -> sp.csr_matrix:
         """Return ``clip((s - a) / (e - a), 0, 1)`` as one column.
 
         See :meth:`LinearInAmounts.basis`.
+
+        Parameters
+        ----------
+        index : array_like of float
+            Index values of one unit, shape ``(n_events,)``. Finite.
+
+        Returns
+        -------
+        scipy.sparse.csr_matrix
+            Shape ``(n_events, 1)``, from 0 at the attachment to 1 at the
+            exhaustion.
         """
-        start, end = _shape(
+        start, end = fixed_thresholds(
             self, "attachment and exhaustion", (self.attachment, self.exhaustion)
         )
-        severity = _severity_1d(self, index)
+        severity = severity_1d(self, index)
         share = np.clip((severity - start) / (end - start), 0.0, 1.0)
         return sp.csr_matrix(share[:, None])
 
@@ -827,18 +840,16 @@ class PiecewiseLinearPayout(LinearInAmounts):
 
     def __post_init__(self) -> None:
         """Validate the parameters and store them as tuples of floats or Free."""
-        tail = check_tail(self.tail)
-        knots = parameter_tuple("knots", self.knots, shape_parameter, 2)
-        check_order("knots", knots, tail)
-        levels = parameter_tuple("levels", self.levels, amount_parameter, 2)
-        check_lengths(("knots", knots), ("levels", levels))
-        monotone = check_flag("monotone", self.monotone)
-        if monotone:
-            check_monotone("levels", levels)
-        _store(self, tail=tail, knots=knots, levels=levels, monotone=monotone)
+        store_levels(self, check_tail(self.tail), "knots", 2)
 
     def amount_names(self) -> tuple[str, ...]:
-        """Return ``("levels[0]", ..., "levels[m-1]")``."""
+        """Return the names of the amounts: the levels.
+
+        Returns
+        -------
+        tuple of str
+            ``("levels[0]", ..., "levels[m-1]")``.
+        """
         return tuple(f"levels[{k}]" for k in range(len(self.knots)))
 
     def basis(self, index: ArrayLike) -> sp.csr_matrix:
@@ -847,20 +858,33 @@ class PiecewiseLinearPayout(LinearInAmounts):
         Between ``c_k`` and ``c_{k+1}`` the weights are ``1 - t`` and ``t``,
         ``t = (s - c_k) / (c_{k+1} - c_k)``; from ``c_{m-1}`` on, 1 on the
         last level; below ``c_0``, none. See :meth:`LinearInAmounts.basis`.
+
+        Parameters
+        ----------
+        index : array_like of float
+            Index values of one unit, shape ``(n_events,)``. Finite.
+
+        Returns
+        -------
+        scipy.sparse.csr_matrix
+            Shape ``(n_events, m)``, one column per knot.
         """
-        knots = _shape(self, "knots", self.knots)
-        severity = _severity_1d(self, index)
-        rows, cols, weights = _interpolation(knots, severity)
-        matrix = sp.csr_matrix(
-            (weights, (rows, cols)), shape=(severity.size, knots.size)
-        )
-        matrix.eliminate_zeros()
-        return matrix
+        knots = fixed_thresholds(self, "knots", self.knots)
+        return piecewise_basis(knots, severity_1d(self, index))
 
     def amount_constraints(self, limit: float | None = None) -> AmountConstraints:
         """Return the bounds, and ``y_k <= y_{k+1}`` if monotone.
 
-        See :meth:`LinearInAmounts.amount_constraints`.
+        Parameters
+        ----------
+        limit : float, optional
+            As in :meth:`LinearInAmounts.amount_constraints`.
+
+        Returns
+        -------
+        AmountConstraints
+            The bounds of :meth:`LinearInAmounts.amount_constraints`, with a
+            row per pair of adjacent levels if the payout is monotone.
         """
         constraints = super().amount_constraints(limit)
         return constraints.with_monotone_rows() if self.monotone else constraints
@@ -901,81 +925,35 @@ class BinaryPayout(LinearInAmounts):
         tail = check_tail(self.tail)
         trigger = shape_parameter("trigger", self.trigger)
         amount = amount_parameter("amount", self.amount)
-        _store(self, tail=tail, trigger=trigger, amount=amount)
+        store_fields(self, tail=tail, trigger=trigger, amount=amount)
 
     def amount_names(self) -> tuple[str, ...]:
-        """Return ``("amount",)``."""
+        """Return the names of the amounts: the amount.
+
+        Returns
+        -------
+        tuple of str
+            ``("amount",)``.
+        """
         return ("amount",)
 
     def basis(self, index: ArrayLike) -> sp.csr_matrix:
         """Return 1 where the severity reaches the trigger, as one column.
 
         See :meth:`LinearInAmounts.basis`.
+
+        Parameters
+        ----------
+        index : array_like of float
+            Index values of one unit, shape ``(n_events,)``. Finite.
+
+        Returns
+        -------
+        scipy.sparse.csr_matrix
+            Shape ``(n_events, 1)``.
         """
-        (trigger,) = _shape(self, "trigger", (self.trigger,))
-        severity = _severity_1d(self, index)
-        rows = np.flatnonzero(severity >= trigger)
-        return sp.csr_matrix(
-            (np.ones(rows.size), (rows, np.zeros(rows.size, dtype=np.intp))),
-            shape=(severity.size, 1),
-        )
-
-
-def _store(payout: PayoutFunction, **values: Any) -> None:
-    """Set the fields of a frozen payout in its ``__post_init__``."""
-    for name, value in values.items():
-        object.__setattr__(payout, name, value)
-
-
-def _index_values(index: ArrayLike) -> NDArray[np.float64]:
-    """Return index values as a finite float array of any shape."""
-    try:
-        values = np.asarray(index, dtype=np.float64)
-    except (TypeError, ValueError) as exc:
-        raise ParametricInputError(f"index values must be numeric: {exc}") from exc
-    if not np.all(np.isfinite(values)):
-        raise ParametricInputError("index values must be finite")
-    return values
-
-
-def _severity_1d(payout: PayoutFunction, index: ArrayLike) -> NDArray[np.float64]:
-    """Return the severity of one unit's index values, which must be 1-D."""
-    severity = payout.severity(index)
-    if severity.ndim != 1:
-        raise ParametricInputError(
-            f"a basis takes one unit's index values, 1-D; got shape {severity.shape}"
-        )
-    return severity
-
-
-def _shape(
-    payout: PayoutFunction, name: str, values: Sequence[Parameter]
-) -> NDArray[np.float64]:
-    """Return fixed thresholds in severity; raise if one is free."""
-    if any(isinstance(value, Free) for value in values):
-        raise UnresolvedParameterError(
-            f"the {payout.kind} payout's {name} must be fixed for its basis: resolve "
-            "them with with_values"
-        )
-    thresholds = np.array(values, dtype=np.float64)
-    return -thresholds if payout.tail == "lower" else thresholds
-
-
-def _interpolation(
-    knots: NDArray[np.float64], severity: NDArray[np.float64]
-) -> tuple[NDArray[np.intp], NDArray[np.intp], NDArray[np.float64]]:
-    """Return rows, columns and weights of a piecewise-linear basis."""
-    last = knots.size - 1
-    segment = np.searchsorted(knots, severity, side="right") - 1
-    inner = np.flatnonzero((segment >= 0) & (segment < last))
-    top = np.flatnonzero(segment == last)
-    left = segment[inner]
-    share = (severity[inner] - knots[left]) / (knots[left + 1] - knots[left])
-    return (
-        np.concatenate([inner, inner, top]),
-        np.concatenate([left, left + 1, np.full(top.size, last)]),
-        np.concatenate([1.0 - share, share, np.ones(top.size)]),
-    )
+        (trigger,) = fixed_thresholds(self, "trigger", (self.trigger,))
+        return binary_basis(trigger, severity_1d(self, index))
 
 
 def check_tail(tail: object) -> str:

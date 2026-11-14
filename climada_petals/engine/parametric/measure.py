@@ -391,6 +391,17 @@ class EventBasis:
     def blocks(self, event_id: ArrayLike) -> NDArray[Any]:
         """Return the block of each given event.
 
+        Parameters
+        ----------
+        event_id : array_like of int
+            The events.
+
+        Returns
+        -------
+        numpy.ndarray
+            Each event's block, read-only: its ``block`` label, or the event
+            id if the basis has no labels.
+
         Raises
         ------
         EventAlignmentError
@@ -418,6 +429,8 @@ class EventBasis:
         Returns
         -------
         OutcomeMeasure
+            On the event basis: one outcome per row, of weight
+            ``f_e / n_draws``.
 
         Raises
         ------

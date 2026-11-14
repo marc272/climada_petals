@@ -179,6 +179,12 @@ The module depends only on CLIMADA, numpy, scipy, pandas and matplotlib.
 
 References
 ----------
+* Kelley, J. E., Jr. (1960). The cutting-plane method for solving convex
+  programs. *Journal of the Society for Industrial and Applied
+  Mathematics*, 8(4), 703-712. https://doi.org/10.1137/0108053. The
+  cutting planes that hold the loaded premium within the budget on the
+  mean squared error's route, applied to that constraint alone
+  (:mod:`~climada_petals.engine.parametric.solvers`).
 * Rockafellar, R. T. and Uryasev, S. (2000). Optimization of conditional
   value-at-risk. *Journal of Risk*, 2(3), 21-41.
   https://doi.org/10.21314/JOR.2000.038. The CVaR as a minimum over a

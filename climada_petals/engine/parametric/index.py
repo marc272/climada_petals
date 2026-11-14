@@ -225,6 +225,9 @@ class ParametricIndex:
         Returns
         -------
         ParametricIndex
+            One row per event of the impact, in its order, with its
+            ``event_id`` and ``event_name``; the units and the definition
+            are this index's.
 
         Raises
         ------
@@ -379,8 +382,16 @@ class ParametricIndex:
             within ``radius_km`` of any of them.
         hazard : climada.hazard.Hazard
             Sets the events: their order, ids and names.
-        radius_km, metric, breakpoints_kn, track_step_hours
-            As in
+        radius_km : float
+            Circle radius in km, > 0.
+        metric : {"category", "max_wind"}, default "category"
+            The category (0 to ``len(breakpoints_kn)``), or the wind in m/s.
+        breakpoints_kn : sequence of float, default SAFFIR_SIMPSON_KN
+            Strictly increasing, positive lower bounds of categories 1, 2,
+            ..., in knots. Used by ``"category"`` only.
+        track_step_hours : float or None, default 0.5
+            Interpolate the tracks to this time step before testing the
+            distance; None uses the track points as they are. As in
             :func:`~climada_petals.engine.parametric.index_tracks.cat_in_circle`.
 
         Returns

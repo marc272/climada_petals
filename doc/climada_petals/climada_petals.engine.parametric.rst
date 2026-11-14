@@ -58,6 +58,22 @@ climada\_petals\.engine\.parametric\.\_parts module
     :undoc-members:
     :show-inheritance:
 
+climada\_petals\.engine\.parametric\.\_payout\_basis module
+-----------------------------------------------------------
+
+.. automodule:: climada_petals.engine.parametric._payout_basis
+    :members:
+    :undoc-members:
+    :show-inheritance:
+
+climada\_petals\.engine\.parametric\.\_payout\_fields module
+------------------------------------------------------------
+
+.. automodule:: climada_petals.engine.parametric._payout_fields
+    :members:
+    :undoc-members:
+    :show-inheritance:
+
 climada\_petals\.engine\.parametric\.\_problem module
 -----------------------------------------------------
 
@@ -70,6 +86,14 @@ climada\_petals\.engine\.parametric\.\_qp module
 ------------------------------------------------
 
 .. automodule:: climada_petals.engine.parametric._qp
+    :members:
+    :undoc-members:
+    :show-inheritance:
+
+climada\_petals\.engine\.parametric\.\_scenario\_samples module
+---------------------------------------------------------------
+
+.. automodule:: climada_petals.engine.parametric._scenario_samples
     :members:
     :undoc-members:
     :show-inheritance:

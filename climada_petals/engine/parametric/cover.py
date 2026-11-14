@@ -166,7 +166,14 @@ class IndexDefinition:
         return (partial(type(self), **fields), ())
 
     def to_dict(self) -> dict[str, Any]:
-        """Return the index definition's document, every field included."""
+        """Return the index definition's document, every field included.
+
+        Returns
+        -------
+        dict
+            JSON-ready: ``index_stat``, ``kind``, ``parameters``, ``source``,
+            ``tail``, ``unit`` and ``weight``.
+        """
         return {
             "index_stat": self.index_stat,
             "kind": self.kind,
@@ -282,6 +289,17 @@ class Limit:
     def amount_of(self, unit_id: Hashable) -> float | None:
         """Return the stated limit of a unit, or None under a rule.
 
+        Parameters
+        ----------
+        unit_id : hashable
+            The unit.
+
+        Returns
+        -------
+        float or None
+            The unit's limit in payout units, or None if the limit is a rule
+            (:meth:`largest_loss`), resolved on a sample.
+
         Raises
         ------
         KeyError
@@ -294,7 +312,14 @@ class Limit:
         return float(self.amount)
 
     def to_dict(self) -> dict[str, Any]:
-        """Return ``{"rule": ...}`` or ``{"amount": ...}``, keyed by ``str(unit)``."""
+        """Return the limit's document.
+
+        Returns
+        -------
+        dict
+            ``{"rule": ...}`` or ``{"amount": ...}``; a mapping of amounts is
+            keyed by ``str(unit)``.
+        """
         if self.rule is not None:
             return {"rule": self.rule}
         if isinstance(self.amount, Mapping):
@@ -661,8 +686,10 @@ class ParametricCover:
             payouts: Any = payout_from_dict(payout)
         elif isinstance(payout, Mapping):
             payouts = {
-                unit: payout_from_dict(item)
-                for unit, item in _by_unit(payout, units, "the payouts").items()
+                unit: payout_from_dict(unit_document)
+                for unit, unit_document in _by_unit(
+                    payout, units, "the payouts"
+                ).items()
             }
         else:
             raise CoverDefinitionError(
@@ -776,10 +803,10 @@ def _frozen(value: object, path: str) -> Any:
         return value
     if isinstance(value, Mapping) and all(isinstance(key, str) for key in value):
         return MappingProxyType(
-            {key: _frozen(item, f"{path}[{key!r}]") for key, item in value.items()}
+            {key: _frozen(entry, f"{path}[{key!r}]") for key, entry in value.items()}
         )
     if isinstance(value, list | tuple):
-        return tuple(_frozen(item, f"{path}[{k}]") for k, item in enumerate(value))
+        return tuple(_frozen(entry, f"{path}[{k}]") for k, entry in enumerate(value))
     raise CoverDefinitionError(
         f"{path} must hold JSON values (finite numbers, strings, lists and "
         f"mappings with string keys), got {value!r}"
@@ -789,9 +816,9 @@ def _frozen(value: object, path: str) -> Any:
 def _thawed(value: object) -> Any:
     """Return a frozen JSON value with dicts and lists again."""
     if isinstance(value, Mapping):
-        return {key: _thawed(item) for key, item in value.items()}
+        return {key: _thawed(entry) for key, entry in value.items()}
     if isinstance(value, tuple):
-        return [_thawed(item) for item in value]
+        return [_thawed(entry) for entry in value]
     return value
 
 
@@ -861,19 +888,20 @@ def _payouts(
         found = {unit: payout[unit] for unit in units}
     else:
         found = dict.fromkeys(units, payout)
-    for unit, item in found.items():
-        if not isinstance(item, PayoutFunction):
+    for unit, unit_payout in found.items():
+        if not isinstance(unit_payout, PayoutFunction):
             raise CoverDefinitionError(
-                f"the payout of unit {unit!r} must be a PayoutFunction, got {item!r}"
+                f"the payout of unit {unit!r} must be a PayoutFunction, got "
+                f"{unit_payout!r}"
             )
-        if len(item.index_names) != 1:
+        if len(unit_payout.index_names) != 1:
             raise CoverDefinitionError(
-                f"the payout of unit {unit!r} reads {len(item.index_names)} index "
-                "components; a cover's payouts read one"
+                f"the payout of unit {unit!r} reads {len(unit_payout.index_names)} "
+                "index components; a cover's payouts read one"
             )
-        if item.tail != tail:
+        if unit_payout.tail != tail:
             raise CoverDefinitionError(
-                f"the payout of unit {unit!r} has tail={item.tail!r}, and the index "
+                f"the payout of unit {unit!r} has tail={unit_payout.tail!r}, and the index "
                 f"has tail={tail!r}"
             )
     return found
