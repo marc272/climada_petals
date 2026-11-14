@@ -1,0 +1,90 @@
+climada\_petals\.engine\.parametric package
+===========================================
+
+climada\_petals\.engine\.parametric\.calibrate module
+-----------------------------------------------------
+
+.. automodule:: climada_petals.engine.parametric.calibrate
+    :members:
+    :undoc-members:
+    :show-inheritance:
+
+climada\_petals\.engine\.parametric\.errors module
+--------------------------------------------------
+
+.. automodule:: climada_petals.engine.parametric.errors
+    :members:
+    :undoc-members:
+    :show-inheritance:
+
+climada\_petals\.engine\.parametric\.index module
+-------------------------------------------------
+
+.. automodule:: climada_petals.engine.parametric.index
+    :members:
+    :undoc-members:
+    :show-inheritance:
+
+climada\_petals\.engine\.parametric\.index\_tracks module
+---------------------------------------------------------
+
+.. automodule:: climada_petals.engine.parametric.index_tracks
+    :members:
+    :undoc-members:
+    :show-inheritance:
+
+climada\_petals\.engine\.parametric\.measure module
+---------------------------------------------------
+
+.. automodule:: climada_petals.engine.parametric.measure
+    :members:
+    :undoc-members:
+    :show-inheritance:
+
+climada\_petals\.engine\.parametric\.metrics module
+---------------------------------------------------
+
+.. automodule:: climada_petals.engine.parametric.metrics
+    :members:
+    :undoc-members:
+    :show-inheritance:
+
+climada\_petals\.engine\.parametric\.objectives module
+------------------------------------------------------
+
+.. automodule:: climada_petals.engine.parametric.objectives
+    :members:
+    :undoc-members:
+    :show-inheritance:
+
+climada\_petals\.engine\.parametric\.payout module
+--------------------------------------------------
+
+.. automodule:: climada_petals.engine.parametric.payout
+    :members:
+    :undoc-members:
+    :show-inheritance:
+
+climada\_petals\.engine\.parametric\.pricing module
+---------------------------------------------------
+
+.. automodule:: climada_petals.engine.parametric.pricing
+    :members:
+    :undoc-members:
+    :show-inheritance:
+
+climada\_petals\.engine\.parametric\.riskmeasures module
+--------------------------------------------------------
+
+.. automodule:: climada_petals.engine.parametric.riskmeasures
+    :members:
+    :undoc-members:
+    :show-inheritance:
+
+climada\_petals\.engine\.parametric\.solvers module
+---------------------------------------------------
+
+.. automodule:: climada_petals.engine.parametric.solvers
+    :members:
+    :undoc-members:
+    :show-inheritance:
