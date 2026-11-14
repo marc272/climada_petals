@@ -17,6 +17,14 @@ climada\_petals\.engine\.parametric\.calibrate module
     :undoc-members:
     :show-inheritance:
 
+climada\_petals\.engine\.parametric\.constraints module
+-------------------------------------------------------
+
+.. automodule:: climada_petals.engine.parametric.constraints
+    :members:
+    :undoc-members:
+    :show-inheritance:
+
 climada\_petals\.engine\.parametric\.cover module
 -------------------------------------------------
 

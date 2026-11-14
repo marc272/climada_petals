@@ -37,8 +37,11 @@ from climada_petals.engine.parametric import (
     EventBasis,
     IndexDefinition,
     InsuredUnits,
+    Limit,
     OutcomeSample,
+    ParametricCover,
     ParametricIndex,
+    PayoutFunction,
 )
 
 #: The definition of the indices that :func:`array_index` builds.
@@ -225,6 +228,27 @@ def array_sample(
         else CatalogueYears.from_labels(impact.event_id, event_year, n_years=n_years)
     )
     return OutcomeSample.from_impact(index, impact, units=units, basis=outcomes), impact
+
+
+def template(
+    sample: OutcomeSample,
+    payout: PayoutFunction,
+    *,
+    limit: Limit | None = Limit.largest_loss(),
+) -> ParametricCover:
+    """Return a cover on a sample's index definition and units, paying in USD.
+
+    The limit is ``Limit.largest_loss()`` unless given: the cap at each
+    unit's largest loss that the calibration applied before covers stated
+    their limit.
+    """
+    return ParametricCover(
+        sample.index.definition,
+        payout,
+        unit_id=sample.unit_id,
+        payout_unit="USD",
+        limit=limit,
+    )
 
 
 def _array_impact(

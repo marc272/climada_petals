@@ -25,6 +25,7 @@ import unittest
 
 import numpy as np
 import pandas as pd
+import scipy.sparse as sp
 
 from climada_petals.engine.parametric import (
     CatalogueYears,
@@ -32,6 +33,7 @@ from climada_petals.engine.parametric import (
     EventBasis,
     IndexDefinition,
     MetricOptions,
+    OutcomeMeasure,
     ParametricCover,
     ParametricInputError,
     PurePremium,
@@ -214,7 +216,12 @@ class TestSubjectMetrics(unittest.TestCase):
         loss = rng.uniform(0.0, 10.0, 8) * (rng.random(8) < 0.7)
         paid = rng.uniform(0.0, 10.0, 8) * (rng.random(8) < 0.6)
         measure = EventBasis().measure(np.arange(8), np.full(8, 0.5 / 8))
-        padded = measure.as_probability()
+        padded = OutcomeMeasure(
+            sp.vstack([measure.grouping, sp.csr_matrix((1, 8))]),
+            np.append(measure.weights, 0.5),
+            "event",
+            "frequency",
+        )
         out = subject_metrics(loss, paid, measure)
         full = subject_metrics(loss, paid, padded)
         self.assertEqual(padded.n_outcomes, 9)

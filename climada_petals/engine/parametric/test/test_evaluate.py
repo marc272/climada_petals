@@ -18,11 +18,7 @@ with CLIMADA. If not, see <https://www.gnu.org/licenses/>.
 
 Tests of the evaluation: tables, premiums, rows, and payouts as an ``Impact``.
 
-The golden cases in ``data/cases`` and their samples in ``data/samples`` are
-copied unchanged from the parity fixtures of the parametric-insurance-design
-repository (``parity/climada/``): small synthetic samples, and the values a
-thesis-faithful reference implementation, or a closed form, gives on them.
-They are dedicated to the public domain (CC0-1.0); every sample records it.
+The golden cases are read with :mod:`._golden`.
 """
 
 from __future__ import annotations
@@ -42,14 +38,14 @@ from climada.entity import Exposures
 from climada.util.yearsets import impact_yearset_from_sampling_vect
 
 from climada_petals.engine.parametric import (
+    Budget,
     CalibrationResult,
-    CatalogueYears,
     CostOfCapitalLoad,
     EventAlignmentError,
-    EventBasis,
     ExpectedUncovered,
     IndexDefinition,
     InsuredUnits,
+    LeakageError,
     MetricOptions,
     OutcomeSample,
     ParametricCover,
@@ -61,6 +57,7 @@ from climada_petals.engine.parametric import (
     WeightedCVaR,
     YearSets,
     calibrate,
+    check_no_leakage,
     compare,
     evaluate,
     holdout,
@@ -69,54 +66,23 @@ from climada_petals.engine.parametric import (
     var_cvar,
     year_block_kfold,
 )
+from climada_petals.engine.parametric.test._golden import (
+    DATA,
+    GOLDEN,
+    golden_cases,
+    golden_pricing,
+    golden_sample,
+    metric_floor,
+    within,
+)
 from climada_petals.engine.parametric.test._synthetic import (
     TABLE_WIND,
     array_sample,
     random_portfolio,
-)
-
-DATA = Path(__file__).parent / "data"
-
-#: The levels and return periods the golden cases list.
-GOLDEN = MetricOptions(betas=(0.9, 0.99), return_periods=(2, 10, 50))
-
-#: Metrics without a unit: their absolute floor is 1e-9, not 1e-9 x the scale.
-UNITLESS = (
-    "coverage_ratio",
-    "payout_to_loss_ratio",
-    "payout_frequency",
-    "correlation",
-    "tail_coverage_",
-    "cvar_uncovered_to_loss_",
-    "false_negative_rate_",
-    "false_positive_rate_",
+    template,
 )
 
 PAYOUT = StepPayout.uniform(20.0, 70.0, 4)
-
-
-def _golden_sample(case: dict[str, Any]) -> tuple[OutcomeSample, float]:
-    """Return a case's sample, every event kept, and the case's scale."""
-    raw = json.loads((DATA / case["sample"]).read_text(encoding="utf-8"))
-    n_units = len(raw["unit_id"])
-    exp = Exposures(
-        lat=np.full(n_units, 10.0),
-        lon=np.linspace(0.0, 1.0, n_units),
-        value=np.ones(n_units),
-    )
-    exp.gdf.index = raw["unit_id"]
-    units = InsuredUnits.points(exp)
-    definition = IndexDefinition.from_dict(case["cover"]["index"])
-    index = ParametricIndex(raw["index"], raw["event_id"], units.unit_id, definition)
-    if case["basis"]["kind"] == "event":
-        basis: Any = EventBasis()
-    else:
-        basis = CatalogueYears.from_labels(
-            raw["event_id"], raw["year"], n_years=case["basis"]["n_years"]
-        )
-    loss = np.asarray(raw["loss"], dtype=float)
-    sample = OutcomeSample(index, loss, raw["frequency"], units, basis)
-    return sample, max(1.0, float(loss.sum(axis=1).max()))
 
 
 def _golden_cover(case: dict[str, Any]) -> ParametricCover:
@@ -131,31 +97,17 @@ def _golden_cover(case: dict[str, Any]) -> ParametricCover:
     return cover
 
 
-def _golden_pricing(document: dict[str, Any]) -> Any:
-    """Return a case's pricing."""
-    if document["kind"] == "pure":
-        return PurePremium()
-    return CostOfCapitalLoad(rate=document["rate"], q=document["q"])
-
-
-def _cases(kind: str) -> list[dict[str, Any]]:
-    """Return the golden cases of one kind."""
-    paths = sorted((DATA / "cases").glob("*.json"))
-    cases = [json.loads(path.read_text(encoding="utf-8")) for path in paths]
-    return [case for case in cases if case["kind"] == kind]
-
-
 class TestGolden(unittest.TestCase):
     """The golden cases, within their stated tolerance."""
 
     def _check_case(self, case: dict[str, Any]) -> int:
         """Compare a case's metrics; return how many values were compared."""
-        sample, scale = _golden_sample(case)
+        sample, scale = golden_sample(case)
         table = evaluate(
             _golden_cover(case),
             sample,
             split="in_sample",
-            pricing=_golden_pricing(case["pricing"]),
+            pricing=golden_pricing(case["pricing"]),
             options=GOLDEN,
         )
         metrics = case["expected"]["metrics"]
@@ -180,11 +132,9 @@ class TestGolden(unittest.TestCase):
         if expected is None:
             self.assertTrue(math.isnan(got), f"{name} should be null, got {got}")
             return
-        floor = 1e-9 if name.startswith(UNITLESS) else 1e-9 * scale
-        candidates = expected["either"] if isinstance(expected, dict) else [expected]
         self.assertTrue(
-            any(abs(got - c) <= max(1e-6 * abs(c), floor) for c in candidates),
-            f"{name}: {got} is not within tolerance of {candidates}",
+            within(expected, got, metric_floor(name, scale)),
+            f"{name}: {got} is not within tolerance of {expected}",
         )
 
     def test_the_copies_are_small_and_licensed(self) -> None:
@@ -195,13 +145,13 @@ class TestGolden(unittest.TestCase):
             self.assertEqual(document["licence"], "CC0-1.0", path.name)
 
     def test_evaluate_cases(self) -> None:
-        cases = _cases("evaluate")
+        cases = golden_cases("evaluate")
         self.assertEqual(len(cases), 16)
         compared = sum(self._check_case(case) for case in cases)
         self.assertGreater(compared, 600)
 
     def test_design_cases_at_their_parameters(self) -> None:
-        cases = _cases("design")
+        cases = golden_cases("design")
         self.assertEqual(len(cases), 32)
         compared = sum(self._check_case(case) for case in cases)
         self.assertGreater(compared, 1200)
@@ -223,12 +173,12 @@ class TestRows(unittest.TestCase):
 
     def _design(self, scope: str, pricing: Any = None) -> CalibrationResult:
         return calibrate(
+            template(self.train, PAYOUT),
             self.train,
-            payout=PAYOUT,
-            objective=WeightedCVaR(alpha=0.9, beta=0.9),
+            WeightedCVaR(alpha=0.9, beta=0.9),
             scope=scope,
             pricing=pricing or PurePremium(),
-            budget=1.0,
+            budget=Budget(ratio=1.0),
         )
 
     def test_a_cover_given_as_it_is(self) -> None:
@@ -311,12 +261,12 @@ class TestRows(unittest.TestCase):
 
     def test_a_joint_design(self) -> None:
         loaded = CostOfCapitalLoad(rate=0.1, q=0.9)
-        design = self._design("portfolio", loaded)
+        design = self._design("joint", loaded)
         table = evaluate(design, self.test, split="out_of_sample")
         self.assertEqual(table["level"].tolist(), ["total"])
         self.assertEqual(table["scope"].iloc[0], "joint")
         self.assertEqual(table["premium"].iloc[0], design.premium)
-        paid = design.payout_matrix(self.test.index).sum(axis=1)
+        paid = design.cover.payout_matrix(self.test.index).sum(axis=1)
         self.assertAlmostEqual(
             table["premium_repriced"].iloc[0], loaded.premium(paid, self.test.measure)
         )
@@ -348,10 +298,10 @@ class TestRows(unittest.TestCase):
             sample.index, sample.loss, sample.frequency, units, sample.basis
         )
         design = calibrate(
+            template(valued, StepPayout.uniform(20.0, 70.0, 2)),
             valued,
-            payout=StepPayout.uniform(20.0, 70.0, 2),
-            objective=ExpectedUncovered(),
-            scope="portfolio",
+            ExpectedUncovered(),
+            scope="joint",
         )
         table = evaluate(
             design, valued, split="in_sample", options=MetricOptions(allocation="value")
@@ -366,11 +316,11 @@ class TestRows(unittest.TestCase):
         expected = {0.999: "single_outcome", 0.05: "expected_uncovered"}
         for beta, flag in expected.items():
             design = calibrate(
+                template(self.train, PAYOUT),
                 self.train,
-                payout=PAYOUT,
-                objective=WeightedCVaR(alpha=0.9, beta=beta),
-                scope="portfolio",
-                budget=1.0,
+                WeightedCVaR(alpha=0.9, beta=beta),
+                scope="joint",
+                budget=Budget(ratio=1.0),
             )
             table = evaluate(design, self.test, split="out_of_sample")
             with self.subTest(beta=beta):
@@ -379,11 +329,11 @@ class TestRows(unittest.TestCase):
     def test_in_sample_metrics_are_the_objective(self) -> None:
         for objective in (ExpectedUncovered(), WeightedCVaR(alpha=0.9, beta=0.9)):
             design = calibrate(
+                template(self.train, PAYOUT),
                 self.train,
-                payout=PAYOUT,
-                objective=objective,
-                scope="portfolio",
-                budget=0.8,
+                objective,
+                scope="joint",
+                budget=Budget(ratio=0.8),
             )
             row = evaluate(
                 design,
@@ -420,7 +370,7 @@ class TestRows(unittest.TestCase):
 
     def test_invalid_arguments_raise(self) -> None:
         design = self._design("individual")
-        template = ParametricCover(
+        unresolved = ParametricCover(
             TABLE_WIND, PAYOUT, unit_id=self.test.unit_id, payout_unit="USD"
         )
         other = ParametricCover(
@@ -471,7 +421,7 @@ class TestRows(unittest.TestCase):
             ):
                 evaluate(*args, **kwargs)
         with self.assertRaises(UnresolvedParameterError):
-            evaluate(template, self.test, split="in_sample")
+            evaluate(unresolved, self.test, split="in_sample")
         # The design's own pricing, stated, is accepted.
         evaluate(design, self.test, split="in_sample", pricing=PurePremium())
 
@@ -494,20 +444,19 @@ class TestRows(unittest.TestCase):
         for function in (payout_impact, uncovered_impact):
             with self.assertRaisesRegex(ParametricInputError, "left out 1 events"):
                 function(paying, sample)
-        fields = {
-            "payout": StepPayout.uniform(0.0, 70.0, 2),
-            "objective": ExpectedUncovered(),
-            "pricing": PurePremium(),
-            "scope": "individual",
-            "basis": "annual",
-            "budget": None,
-            "unit_id": ("U0",),
-            "levels": [[1.0, 5.0]],
-            "problems": (),
-            "calibration_years": None,
-        }
+        # A design whose first step holds an index of 0 and both events, made
+        # on a sample that left nothing out, pays there too.
+        whole, _ = array_sample([[30.0], [60.0]], [[4.0], [10.0]], [0, 1], 10)
+        design = calibrate(
+            template(whole, StepPayout.uniform(0.0, 140.0, 2)),
+            whole,
+            ExpectedUncovered(),
+            scope="individual",
+            budget=Budget(ratio=0.5),
+        )
+        self.assertGreater(design.cover.payout["U0"].levels[0], 0.0)
         with self.assertRaisesRegex(ParametricInputError, "left out 1 events"):
-            evaluate(CalibrationResult(**fields), sample, split="in_sample")
+            evaluate(design, sample, split="in_sample")
         # A first level of 0 pays nothing at an index of 0.
         unpaid = ParametricCover(
             TABLE_WIND,
@@ -519,6 +468,65 @@ class TestRows(unittest.TestCase):
         self.assertAlmostEqual(table["expected_payout"].iloc[-1], 0.5)
 
 
+class TestDesigns(unittest.TestCase):
+    """What the evaluation reads from a design: its fill rule and design sample."""
+
+    def setUp(self) -> None:
+        # Ten catalogue years: the training years 0 to 6 hold indices 30 and
+        # 35, in the first step; the test years 7 to 9 hold 60, in the second
+        # step, which no training event reaches, and 25.
+        self.sample, _ = array_sample(
+            [[30.0], [35.0], [60.0], [25.0]],
+            [[4.0], [6.0], [10.0], [2.0]],
+            [0, 1, 7, 8],
+            10,
+        )
+        self.train, self.test = holdout(self.sample, train_fraction=0.7)
+        self.design = calibrate(
+            template(self.train, StepPayout.uniform(20.0, 70.0, 2)),
+            self.train,
+            ExpectedUncovered(),
+            scope="individual",
+            budget=Budget(ratio=0.5),
+        )
+
+    def test_unidentified_share(self) -> None:
+        self.assertEqual(dict(self.design.unidentified), {"U0": ("levels[1]",)})
+        in_sample = evaluate(self.design, self.train, split="in_sample")
+        np.testing.assert_array_equal(in_sample["unidentified_share"], [0.0, 0.0])
+        # The test year 7 of three lands on the filled level.
+        table = evaluate(self.design, self.test, split="out_of_sample")
+        np.testing.assert_allclose(table["unidentified_share"], [1 / 3, 1 / 3])
+        cover = self.design.cover
+        self.assertTrue(
+            evaluate(cover, self.test, split="out_of_sample")["unidentified_share"]
+            .isna()
+            .all()
+        )
+
+    def test_an_overlapping_sample_raises(self) -> None:
+        with self.assertRaisesRegex(LeakageError, "events are in both samples"):
+            evaluate(self.design, self.train, split="out_of_sample")
+        whole = calibrate(
+            template(self.sample, StepPayout.uniform(20.0, 70.0, 2)),
+            self.sample,
+            ExpectedUncovered(),
+            scope="joint",
+            budget=Budget(ratio=0.5),
+        )
+        with self.assertRaisesRegex(LeakageError, "events are in both samples"):
+            evaluate(whole, self.test, split="out_of_sample")
+        # In sample, or on a whole sample (such as another hazard set's), the
+        # samples are not compared.
+        evaluate(self.design, self.train, split="in_sample")
+        evaluate(self.design, self.sample, split="out_of_sample")
+        # Disjoint sides of one split pass.
+        evaluate(self.design, self.test, split="out_of_sample")
+        check_no_leakage(self.design.design_sample, self.test)
+        with self.assertRaisesRegex(ParametricInputError, "design must be"):
+            check_no_leakage(self.design, self.test)
+
+
 class TestCompare(unittest.TestCase):
     """Several entries in one table."""
 
@@ -527,13 +535,13 @@ class TestCompare(unittest.TestCase):
         self.train, self.test = holdout(sample, train_fraction=0.7)
         self.designs = [
             calibrate(
+                template(self.train, PAYOUT),
                 self.train,
-                payout=PAYOUT,
-                objective=ExpectedUncovered(),
+                ExpectedUncovered(),
                 scope=scope,
-                budget=1.0,
+                budget=Budget(ratio=1.0),
             )
-            for scope in ("individual", "portfolio")
+            for scope in ("individual", "joint")
         ]
         self.cover = ParametricCover(
             TABLE_WIND,
@@ -578,17 +586,17 @@ class TestImpacts(unittest.TestCase):
     def setUp(self) -> None:
         self.sample, self.impact = random_portfolio(4)
         self.design = calibrate(
+            template(self.sample, PAYOUT),
             self.sample,
-            payout=PAYOUT,
-            objective=WeightedCVaR(alpha=0.5, beta=0.9),
-            scope="portfolio",
-            budget=1.0,
+            WeightedCVaR(alpha=0.5, beta=0.9),
+            scope="joint",
+            budget=Budget(ratio=1.0),
         )
 
     def test_payouts_are_a_climada_impact(self) -> None:
         paid = payout_impact(self.design, self.sample)
         self.assertIsInstance(paid, Impact)
-        matrix = self.design.payout_matrix(self.sample.index)
+        matrix = self.design.cover.payout_matrix(self.sample.index)
         np.testing.assert_allclose(paid.imp_mat.toarray(), matrix)
         np.testing.assert_allclose(paid.at_event, matrix.sum(axis=1))
         np.testing.assert_allclose(paid.eai_exp, self.sample.frequency @ matrix)
@@ -626,7 +634,7 @@ class TestImpacts(unittest.TestCase):
     def test_uncovered_losses(self) -> None:
         shortfall = uncovered_impact(self.design, self.sample)
         loss = self.sample.loss.toarray()
-        paid = self.design.payout_matrix(self.sample.index)
+        paid = self.design.cover.payout_matrix(self.sample.index)
         np.testing.assert_allclose(
             shortfall.imp_mat.toarray(), np.maximum(loss - paid, 0)
         )

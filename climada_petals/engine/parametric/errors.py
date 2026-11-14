@@ -27,13 +27,16 @@ from __future__ import annotations
 
 __all__ = [
     "CalibrationError",
+    "CalibrationLimitError",
     "CoverDefinitionError",
     "EventAlignmentError",
     "ImpactInputError",
+    "InfeasibleCalibrationError",
     "LeakageError",
     "MissingDependencyError",
     "ParametricError",
     "ParametricInputError",
+    "UnboundedCalibrationError",
     "UnitMappingError",
     "UnknownPayoutKindError",
     "UnresolvedParameterError",
@@ -127,24 +130,53 @@ class UnresolvedParameterError(ParametricError, ValueError):
 
 
 class CalibrationError(ParametricError, RuntimeError):
-    """A design problem could not be solved.
+    """A design problem could not be solved, or its solution failed a check.
+
+    The base of :class:`InfeasibleCalibrationError`,
+    :class:`UnboundedCalibrationError` and :class:`CalibrationLimitError`.
+    Raised itself when the solver reports another failure, such as numerical
+    trouble, or when the solution breaks a constraint or doesn't reproduce
+    the solver's objective value.
 
     Parameters
     ----------
     message : str
         What went wrong.
     problem_id : str
-        The design problem: a unit id, or ``"portfolio"``.
+        The design problem: a unit id, or ``"joint"``.
     status : str, optional
         The solver's status, if it returned one.
+    solver_message : str, optional
+        The solver's own message, if it returned one.
     """
 
     def __init__(
-        self, message: str, *, problem_id: str, status: str | None = None
+        self,
+        message: str,
+        *,
+        problem_id: str,
+        status: str | None = None,
+        solver_message: str | None = None,
     ) -> None:
         super().__init__(f"design problem {problem_id!r}: {message}")
         self.problem_id = problem_id
         self.status = status
+        self.solver_message = solver_message
+
+
+class InfeasibleCalibrationError(CalibrationError):
+    """The solver found no amounts that meet every constraint.
+
+    For example, fixed amounts whose premium is above the budget.
+    """
+
+
+class UnboundedCalibrationError(CalibrationError):
+    """The solver found the objective unbounded below."""
+
+
+class CalibrationLimitError(CalibrationError):
+    """A stated limit of the calibration was reached, such as ``time_limit``."""
 
 
 class MissingDependencyError(ParametricError, ImportError):

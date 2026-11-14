@@ -110,13 +110,29 @@ Column                 Meaning
 ``degenerate_tail``    and for a cover given as it is. ``degenerate_tail``
                        is ``"expected_uncovered"`` when the tail held every
                        loss, so the weighted-CVaR design minimised ``E[U]``,
-                       or ``"single_outcome"`` when ``1 - beta`` was below
-                       one outcome's weight
+                       or ``"single_outcome"`` when ``1 - beta`` was at most
+                       the weight of one outcome with a loss
 ``comonotone_index``   Null: this version doesn't run index diagnostics
 =====================  ===================================================
 
 External numbers come from out-of-sample rows on the annual basis.
 In-sample rows exist for the overfitting gap.
+
+Designs
+-------
+A design is read from its record
+(:class:`~climada_petals.engine.parametric.calibrate.CalibrationResult`): it
+pays by its resolved cover, ``result.cover``; ``unidentified_share`` reads
+the amounts the fill rule set (``result.filled``), and is null for a cover
+given as it is. An **out-of-sample** evaluation of a design on a sample cut
+from another (by :func:`~climada_petals.engine.parametric.sample.holdout`,
+:func:`~climada_petals.engine.parametric.sample.year_block_kfold` or
+``select``) is checked against the design sample
+(:func:`~climada_petals.engine.parametric.sample.check_no_leakage`): a
+shared event or block raises
+:class:`~climada_petals.engine.parametric.errors.LeakageError`. A whole
+sample is not compared, because another hazard set's event ids and years
+can coincide with the design sample's by chance.
 
 CLIMADA objects
 ---------------
@@ -141,7 +157,7 @@ refuses it on such a sample
 from __future__ import annotations
 
 import math
-from collections.abc import Callable, Hashable, Mapping, Sequence
+from collections.abc import Callable, Hashable, Sequence
 from typing import Any, Final, NamedTuple
 
 import numpy as np
@@ -151,7 +167,7 @@ from climada.engine import Impact
 from numpy.typing import NDArray
 
 from ._checks import check_int, check_real
-from .calibrate import PORTFOLIO, CalibrationResult
+from .calibrate import JOINT, CalibrationResult, DesignSample
 from .cover import ParametricCover
 from .errors import EventAlignmentError, ParametricInputError
 from .index import ParametricIndex
@@ -163,9 +179,8 @@ from .metrics import (
     pricing_text,
     subject_metrics,
 )
-from .payout import StepPayout
 from .pricing import CostOfCapitalLoad, Pricing, PurePremium
-from .sample import OutcomeSample, check_left_out_unpaid
+from .sample import OutcomeSample, check_left_out_unpaid, check_no_leakage
 
 __all__ = [
     "compare",
@@ -174,7 +189,6 @@ __all__ = [
     "uncovered_impact",
 ]
 
-_JOINT: Final[str] = "joint"
 _INDIVIDUAL: Final[str] = "individual"
 
 
@@ -183,8 +197,10 @@ class _Entry(NamedTuple):
 
     ``pay`` returns the payout per event and unit of an index, in the order
     of ``cover.unit_id``. A design has a ``scope``, its ``pricing`` and one
-    premium and degenerate-tail flag per design problem (one per unit, or
-    one), and ``unique`` and ``ties`` where it records them.
+    premium and degenerate tail per design problem (one per unit, or one),
+    ``unique`` and ``ties`` where it records them, ``filled``, which says
+    where its payout comes from an amount the fill rule set, and the record
+    of its design sample.
     """
 
     cover: ParametricCover
@@ -195,6 +211,8 @@ class _Entry(NamedTuple):
     degenerate: tuple[str | None, ...] = ()
     unique: bool | None = None
     ties: int | None = None
+    filled: Callable[[ParametricIndex], NDArray[np.bool_]] | None = None
+    design: DesignSample | None = None
 
 
 class _Context(NamedTuple):
@@ -205,45 +223,6 @@ class _Context(NamedTuple):
     pricing: Pricing
     premium: float | None
     options: MetricOptions
-
-
-def _degenerate(diagnostics: Mapping[str, Any]) -> str | None:
-    """Return a design problem's degenerate tail from its diagnostics."""
-    if diagnostics.get("degenerate_tail"):
-        return "expected_uncovered"
-    if diagnostics.get("tail_within_one_outcome"):
-        return "single_outcome"
-    return None
-
-
-def _design_cover(result: CalibrationResult, sample: OutcomeSample) -> ParametricCover:
-    """Return the terms of a calibration result, on the sample's index definition.
-
-    A calibration result records neither its index definition nor its
-    payout unit, so the cover takes the evaluation sample's definition and
-    the unit of its exposures' values. The levels are written as found,
-    with rounding below 0 or below the previous level of a monotone payout
-    removed (the solver meets the constraints to its tolerance), for the
-    hash. The payouts evaluated are the result's own.
-    """
-    levels = np.maximum(result.levels, 0.0)
-    if result.payout.monotone:
-        levels = np.maximum.accumulate(levels, axis=1)
-    payouts = {
-        unit: StepPayout(
-            result.payout.breakpoints,
-            levels[j].tolist(),
-            tail=result.payout.tail,
-            monotone=result.payout.monotone,
-        )
-        for j, unit in enumerate(result.unit_id)
-    }
-    return ParametricCover(
-        sample.index.definition,
-        payouts,
-        unit_id=list(result.unit_id),
-        payout_unit=str(sample.units.exposures.value_unit),
-    )
 
 
 def _entry(entry: object, sample: OutcomeSample) -> _Entry:
@@ -261,12 +240,16 @@ def _entry(entry: object, sample: OutcomeSample) -> _Entry:
         found = _Entry(entry, entry.payout_matrix)
     elif isinstance(entry, CalibrationResult):
         found = _Entry(
-            _design_cover(entry, sample),
-            entry.payout_matrix,
-            scope=_JOINT if entry.scope == PORTFOLIO else _INDIVIDUAL,
+            entry.cover,
+            entry.cover.payout_matrix,
+            scope=entry.scope,
             pricing=entry.pricing,
             premiums=tuple(problem.premium for problem in entry.problems),
-            degenerate=tuple(_degenerate(p.diagnostics) for p in entry.problems),
+            degenerate=tuple(problem.degenerate_tail for problem in entry.problems),
+            unique=entry.unique,
+            ties=entry.ties,
+            filled=entry.filled,
+            design=entry.design_sample,
         )
     else:
         raise ParametricInputError(
@@ -314,8 +297,8 @@ def _context(
         is given another pricing than its own, or an allocation is asked of
         an entry that is not a joint design.
     LeakageError
-        If an out-of-sample evaluation shares an event or a block with the
-        design's sample.
+        If an out-of-sample evaluation of a design, on a sample cut from
+        another, shares an event or a block with the design sample.
     """
     pricing, premium, options = stated
     if split not in SPLITS:
@@ -339,13 +322,16 @@ def _context(
         )
     if not isinstance(options, MetricOptions):
         raise ParametricInputError(f"options must be MetricOptions, got {options!r}")
-    if options.allocation is not None and found.scope != _JOINT:
+    if options.allocation is not None and found.scope != JOINT:
         raise ParametricInputError(
             f"allocation={options.allocation!r} takes joint designs only, so that "
             "allocated rows never stand beside the rows of covers that pay by their "
             "own terms"
         )
     _check_left_out(found, sample)
+    design = found.design
+    if split == "out_of_sample" and design is not None and sample.split is not None:
+        check_no_leakage(design, sample)
     return _Context(
         str(split),
         chosen,
@@ -366,12 +352,21 @@ class _Subject(NamedTuple):
     premium_basis: str | None
     repriced: float | None
     degenerate: str | None
+    filled: NDArray[np.bool_] | None
 
 
 def _unit_subjects(
-    found: _Entry, sample: OutcomeSample, paid: NDArray[np.float64], context: _Context
+    found: _Entry,
+    sample: OutcomeSample,
+    payouts: tuple[NDArray[np.float64], NDArray[np.bool_] | None],
+    context: _Context,
 ) -> list[_Subject]:
-    """Return the ``"unit"`` subjects of a cover or an individual design."""
+    """Return the ``"unit"`` subjects of a cover or an individual design.
+
+    ``payouts`` holds the payout per row and unit, and where a design's
+    payout comes from an amount its fill rule set, or None.
+    """
+    paid, filled = payouts
     loss = sp.csc_matrix(sample.loss)
     single = sample.n_units == 1 and context.premium is not None
     subjects = []
@@ -393,6 +388,7 @@ def _unit_subjects(
                 basis,
                 repriced,
                 found.degenerate[j] if found.scope == _INDIVIDUAL else None,
+                None if filled is None else filled[:, j],
             )
         )
     return subjects
@@ -401,11 +397,12 @@ def _unit_subjects(
 def _total_subject(
     found: _Entry,
     sample: OutcomeSample,
-    paid: NDArray[np.float64],
+    payouts: tuple[NDArray[np.float64], NDArray[np.bool_] | None],
     context: _Context,
     units: list[_Subject],
 ) -> _Subject:
     """Return the ``"total"`` subject: the owner's total over the units."""
+    paid, filled = payouts
     total = paid.sum(axis=1)
     if found.scope == _INDIVIDUAL:
         premium = float(sum(found.premiums))
@@ -413,9 +410,9 @@ def _total_subject(
         basis, degenerate = "design", None
     else:
         repriced = context.pricing.premium(total, sample.measure)
-        premium = found.premiums[0] if found.scope == _JOINT else repriced
-        basis = "design" if found.scope == _JOINT else "evaluation"
-        degenerate = found.degenerate[0] if found.scope == _JOINT else None
+        premium = found.premiums[0] if found.scope == JOINT else repriced
+        basis = "design" if found.scope == JOINT else "evaluation"
+        degenerate = found.degenerate[0] if found.scope == JOINT else None
     if context.premium is not None:
         premium, basis = context.premium, "stated"
     return _Subject(
@@ -427,6 +424,7 @@ def _total_subject(
         basis,
         repriced,
         degenerate,
+        None if filled is None else filled.any(axis=1),
     )
 
 
@@ -452,6 +450,7 @@ def _allocated_subjects(
             None,
             None,
             total.degenerate,
+            total.filled,
         )
         for j, unit in enumerate(sample.unit_id)
     ]
@@ -468,6 +467,7 @@ def _row(
         subject.payout,
         sample.measure,
         premium=subject.premium,
+        filled=subject.filled,
         options=context.options,
     )
     return {
@@ -560,8 +560,9 @@ def evaluate(
     UnresolvedParameterError
         If a cover is a template.
     LeakageError
-        If the design records its design sample, and an out-of-sample
-        sample shares an event or a block with it.
+        If ``split="out_of_sample"``, the entry is a design and the sample
+        was cut from another, and the sample shares an event or a block
+        with the design sample (module docstring).
 
     Examples
     --------
@@ -571,14 +572,18 @@ def evaluate(
     """
     found = _entry(entry, _check_sample(sample))
     context = _context(found, sample, split, fold, (pricing, premium, options))
-    paid = found.pay(sample.index)[sample.event_row]
-    if found.scope == _JOINT:
-        subjects = [_total_subject(found, sample, paid, context, [])]
+    rows = sample.event_row
+    payouts = (
+        found.pay(sample.index)[rows],
+        None if found.filled is None else found.filled(sample.index)[rows],
+    )
+    if found.scope == JOINT:
+        subjects = [_total_subject(found, sample, payouts, context, [])]
         if options.allocation is not None:
             subjects += _allocated_subjects(sample, subjects[0], options.allocation)
     else:
-        subjects = _unit_subjects(found, sample, paid, context)
-        subjects.append(_total_subject(found, sample, paid, context, subjects))
+        subjects = _unit_subjects(found, sample, payouts, context)
+        subjects.append(_total_subject(found, sample, payouts, context, subjects))
     return _frame([_row(found, sample, s, context) for s in subjects], options)
 
 
@@ -636,7 +641,7 @@ def compare(
         others = [
             position
             for position, entry in enumerate(entries)
-            if not (isinstance(entry, CalibrationResult) and entry.scope == PORTFOLIO)
+            if not (isinstance(entry, CalibrationResult) and entry.scope == JOINT)
         ]
         if others:
             raise ParametricInputError(

@@ -40,6 +40,7 @@ from climada.entity import ImpactFuncSet, ImpfTropCyclone
 
 from climada_petals.engine.parametric import (
     ENSEMBLE_PARENT,
+    Budget,
     CatalogueYears,
     EventAlignmentError,
     EventBasis,
@@ -75,6 +76,7 @@ from climada_petals.engine.parametric.test._synthetic import (
     grid_impact,
     hazard_and_impact,
     random_portfolio,
+    template,
     three_tracks,
 )
 from climada_petals.util.config import LOGGER
@@ -259,13 +261,17 @@ class TestRoutes(unittest.TestCase):
         )
         self.assertAlmostEqual(sampled.correction_factor or 0.0, 1.0, places=12)
         cases = itertools.product(
-            ("individual", "portfolio"),
+            ("individual", "joint"),
             (ExpectedUncovered(), WeightedCVaR(alpha=0.9, beta=0.95)),
         )
         for scope, objective in cases:
             covers = [
                 calibrate(
-                    sample, payout=PAYOUT, objective=objective, scope=scope, budget=0.8
+                    template(sample, PAYOUT),
+                    sample,
+                    objective,
+                    scope=scope,
+                    budget=Budget(ratio=0.8),
                 )
                 for sample in (catalogue, sampled)
             ]
@@ -274,7 +280,7 @@ class TestRoutes(unittest.TestCase):
                 for sample in (catalogue, sampled)
             ]
             with self.subTest(scope=scope, objective=objective):
-                np.testing.assert_array_equal(covers[0].levels, covers[1].levels)
+                self.assertEqual(covers[0].cover, covers[1].cover)
                 self.assertEqual(covers[0].premium, covers[1].premium)
                 pd.testing.assert_frame_equal(tables[0], tables[1])
 
@@ -336,11 +342,11 @@ class TestRoutes(unittest.TestCase):
         self.assertAlmostEqual(on_years.correction_factor or 0.0, 1.0, delta=0.06)
         for sample in (on_events, on_years):
             cover = calibrate(
+                template(sample, PAYOUT),
                 sample,
-                payout=PAYOUT,
-                objective=WeightedCVaR(alpha=0.9, beta=0.95),
-                scope="portfolio",
-                budget=1.0,
+                WeightedCVaR(alpha=0.9, beta=0.95),
+                scope="joint",
+                budget=Budget(ratio=1.0),
             )
             table = evaluate(cover, sample, split="in_sample")
             with self.subTest(route=sample.route):
@@ -360,7 +366,7 @@ class TestRoutes(unittest.TestCase):
             np.vstack([loss, np.zeros((15, 2))]),
             np.r_[years, rng.integers(0, 40, size=15)],
         )
-        cases = itertools.product(("annual", "event"), ("individual", "portfolio"))
+        cases = itertools.product(("annual", "event"), ("individual", "joint"))
         for basis, scope in cases:
             samples = [
                 array_sample(*arrays, 40, basis=basis)[0]
@@ -368,11 +374,11 @@ class TestRoutes(unittest.TestCase):
             ]
             covers = [
                 calibrate(
+                    template(sample, PAYOUT),
                     sample,
-                    payout=PAYOUT,
-                    objective=WeightedCVaR(alpha=0.9, beta=0.9),
+                    WeightedCVaR(alpha=0.9, beta=0.9),
                     scope=scope,
-                    budget=0.5,
+                    budget=Budget(ratio=0.5),
                 )
                 for sample in samples
             ]
@@ -425,16 +431,16 @@ class TestCatalogueOnClimada(unittest.TestCase):
         np.testing.assert_array_equal(test.years, np.arange(7000, N_CATALOGUE))
         np.testing.assert_array_equal(test.event_year, [7000, 9999, 9999])
         payout = StepPayout.uniform(attachment=20, exhaustion=70, n_steps=5)
-        for scope in ("individual", "portfolio"):
+        for scope in ("individual", "joint"):
             cover = calibrate(
+                template(train, payout),
                 train,
-                payout=payout,
-                objective=ExpectedUncovered(),
+                ExpectedUncovered(),
                 scope=scope,
-                budget=1.0,
+                budget=Budget(ratio=1.0),
             )
             with self.subTest(scope=scope):
-                np.testing.assert_array_equal(cover.calibration_years, train.years)
+                np.testing.assert_array_equal(cover.design_sample.years, train.years)
                 self.assertGreater(cover.premium, 0.0)
                 metrics = evaluate(cover, test, split="out_of_sample")
                 # A joint design has one row, the owner's total.
@@ -510,13 +516,13 @@ class TestCatalogueOnClimada(unittest.TestCase):
         stated = CatalogueYears.from_dates(hazard, n_years=10, first_year=2001)
         sample = OutcomeSample.from_impact(index, impact, units=units, basis=stated)
         payout = StepPayout.uniform(attachment=0.5, exhaustion=2.5, n_steps=2)
-        for scope in ("individual", "portfolio"):
+        for scope in ("individual", "joint"):
             cover = calibrate(
+                template(sample, payout),
                 sample,
-                payout=payout,
-                objective=ExpectedUncovered(),
+                ExpectedUncovered(),
                 scope=scope,
-                budget=1.0,
+                budget=Budget(ratio=1.0),
             )
             # A joint design has per-unit rows only under a stated allocation.
             allocation = None if scope == "individual" else "value"

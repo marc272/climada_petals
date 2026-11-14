@@ -60,17 +60,17 @@ from CLIMADA's ``Hazard``, ``TCTracks``, ``Exposures`` and ``Impact``:
   sides (:func:`check_no_leakage`, :class:`LeakageError`).
 * **Objectives:** :class:`WeightedCVaR`, the tail objective
   ``alpha CVaR_beta(U) + (1 - alpha) E[U]`` of the uncovered loss ``U``,
-  next to :class:`ExpectedUncovered` (``E[U]``) and
-  :class:`MeanSquaredError`. The first two are linear programs solved with
-  scipy's HiGHS; the mean squared error is a quadratic program and needs the
-  optional dependency cvxpy.
-* **Calibration scope:** :func:`calibrate` chooses the levels of a step
-  payout template (:meth:`StepPayout.uniform`) with ``scope="individual"``
-  (one design problem per unit) or ``scope="portfolio"`` (one
-  joint problem on the owner's total loss, so the units' payouts can offset
-  each other's shortfalls), and returns a :class:`CalibrationResult`.
-  Pricing: :class:`PurePremium` or :class:`CostOfCapitalLoad`, under a
-  premium budget.
+  next to :class:`ExpectedUncovered` (``E[U]``) and :class:`MSE`. The first
+  two are linear programs solved with scipy's HiGHS; the mean squared error
+  is a quadratic program and needs the optional dependency cvxpy in this
+  version.
+* **Calibration:** :func:`calibrate` chooses the free amounts of a template
+  cover on a design sample, with ``scope="individual"`` (one design problem
+  per unit) or ``scope="joint"`` (one problem on the owner's total loss, so
+  the units' payouts can offset each other's shortfalls), and returns a
+  :class:`CalibrationResult`, which holds the resolved cover and how it was
+  found. Pricing: :class:`PurePremium` or :class:`CostOfCapitalLoad`, under
+  a premium :class:`Budget`; options in :class:`CalibrationOptions`.
 * **Evaluation:** :func:`evaluate` and :func:`compare` give the metrics of
   any cover, designed or given, on a sample, in or out of sample, as a
   pandas table: coverage, tail coverage, basis risk, VaR and CVaR of the
@@ -85,21 +85,31 @@ from CLIMADA's ``Hazard``, ``TCTracks``, ``Exposures`` and ``Impact``:
   :func:`plot_exceedance`.
 
 The module depends only on CLIMADA, numpy, scipy, pandas and matplotlib,
-plus cvxpy for the mean squared error.
+plus cvxpy for the mean squared error in this version.
 """
 
 from .annual import CatalogueYears, YearSets, sample_years
-from .calibrate import CalibrationResult, CoverProblem, calibrate
+from .calibrate import (
+    CalibrationOptions,
+    CalibrationResult,
+    CoverProblem,
+    DesignSample,
+    calibrate,
+)
+from .constraints import Budget
 from .cover import IndexDefinition, Limit, ParametricCover
 from .errors import (
     CalibrationError,
+    CalibrationLimitError,
     CoverDefinitionError,
     EventAlignmentError,
     ImpactInputError,
+    InfeasibleCalibrationError,
     LeakageError,
     MissingDependencyError,
     ParametricError,
     ParametricInputError,
+    UnboundedCalibrationError,
     UnitMappingError,
     UnknownPayoutKindError,
     UnresolvedParameterError,
@@ -110,7 +120,7 @@ from .index import ParametricIndex
 from .index_tracks import SAFFIR_SIMPSON_KN
 from .measure import ENSEMBLE_PARENT, EventBasis, OutcomeMeasure, labels_from_names
 from .metrics import MetricOptions, setup_text
-from .objectives import ExpectedUncovered, MeanSquaredError, WeightedCVaR
+from .objectives import MSE, ExpectedUncovered, WeightedCVaR
 from .parameters import AmountConstraints, Free
 from .payout import (
     BinaryPayout,
@@ -135,27 +145,32 @@ from .units import InsuredUnits
 
 __all__ = [
     "ENSEMBLE_PARENT",
+    "MSE",
     "SAFFIR_SIMPSON_KN",
     "AmountConstraints",
     "BinaryPayout",
+    "Budget",
     "CalibrationError",
+    "CalibrationLimitError",
+    "CalibrationOptions",
     "CalibrationResult",
     "CatalogueYears",
     "CostOfCapitalLoad",
     "CoverDefinitionError",
     "CoverProblem",
+    "DesignSample",
     "EventAlignmentError",
     "EventBasis",
     "ExpectedUncovered",
     "Free",
     "ImpactInputError",
     "IndexDefinition",
+    "InfeasibleCalibrationError",
     "InsuredUnits",
     "LeakageError",
     "Limit",
     "LinearInAmounts",
     "LinearPayout",
-    "MeanSquaredError",
     "MetricOptions",
     "MissingDependencyError",
     "OutcomeMeasure",
@@ -169,6 +184,7 @@ __all__ = [
     "PurePremium",
     "SplitRecord",
     "StepPayout",
+    "UnboundedCalibrationError",
     "UnitMappingError",
     "UnknownPayoutKindError",
     "UnresolvedParameterError",
