@@ -93,8 +93,8 @@ SLSQP_OPTIONS: Final[dict[str, Any]] = {"ftol": 1e-12, "maxiter": 3_000}
 ``ftol`` bounds, among others, the change of the scaled objective, which is
 at most 1 at the optimum, and the constraints' violation in a converged
 solve. Its default, ``1e-6``, leaves designs up to about ``1e-6`` away from
-the optimum; at ``1e-13``, solves with many nearly parallel cuts sometimes
-end in a failed line search at a point within ``1e-11`` of their cut.
+the optimum; at ``1e-13``, some solves with many nearly parallel cuts end
+in a failed line search next to the optimum.
 ``maxiter`` is ``SLSQP``'s iteration limit per solve."""
 
 UNIQUE_RTOL: Final[float] = 1e-10
