@@ -16,7 +16,7 @@ with CLIMADA. If not, see <https://www.gnu.org/licenses/>.
 
 ---
 
-Tests of the outcome measures and the risk measures.Tests of the outcome measures, the bases and the risk measures."""
+Tests of the outcome measures and the bases."""
 
 from __future__ import annotations
 
@@ -40,7 +40,6 @@ from climada_petals.engine.parametric import (
     YearSets,
     labels_from_names,
     sample_years,
-    var_cvar,
 )
 
 
@@ -388,38 +387,6 @@ class TestSampleYears(unittest.TestCase):
                 self.assertRaisesRegex(ParametricInputError, match),
             ):
                 sample_years(*args)
-
-
-class TestVarCvar(unittest.TestCase):
-    """Lower quantile and Rockafellar-Uryasev CVaR."""
-
-    def test_example(self) -> None:
-        self.assertEqual(var_cvar([0.0, 1.0, 2.0, 10.0], [0.25] * 4, 0.5), (1.0, 6.0))
-
-    def test_atom_at_the_var_is_split(self) -> None:
-        var, cvar = var_cvar([0.0, 4.0], [0.9, 0.1], 0.8)
-        self.assertEqual(var, 0.0)
-        self.assertAlmostEqual(cvar, 2.0)
-
-    def test_a_level_on_a_step_gives_the_exact_lower_quantile(self) -> None:
-        values = np.arange(100.0)
-        prob = np.full(100, 0.01)
-        for beta in (0.9, 0.95, 0.99):
-            var, cvar = var_cvar(values, prob, beta)
-            self.assertEqual(var, round(beta * 100) - 1)
-            self.assertAlmostEqual(cvar, values[values > var].mean())
-
-    def test_invalid_inputs_raise(self) -> None:
-        with self.assertRaises(ParametricInputError):
-            var_cvar([1.0], [1.0], 1.0)
-        with self.assertRaises(ParametricInputError):
-            var_cvar([1.0, 2.0], [0.5, 0.6], 0.5)
-        for values, prob in (([], []), ([1.0, 2.0], [1.0]), ([1.0], [-1.0])):
-            with (
-                self.subTest(values=values, prob=prob),
-                self.assertRaisesRegex(ParametricInputError, "non-empty"),
-            ):
-                var_cvar(values, prob, 0.5)
 
 
 if __name__ == "__main__":

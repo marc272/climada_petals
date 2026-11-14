@@ -1,0 +1,107 @@
+{
+  "basis": {"kind": "event"},
+  "budget": {"ratio": 0.8},
+  "case_id": "step-mse-pure-event-joint-s2",
+  "compare_parameters": "exact",
+  "cover": {
+    "index": {
+      "index_stat": null,
+      "kind": "table",
+      "parameters": null,
+      "source": "synthetic",
+      "tail": "upper",
+      "unit": "m/s",
+      "weight": null
+    },
+    "label": null,
+    "limit": {"rule": "largest_loss"},
+    "payout": {
+      "breakpoints": [25.0, 30.0, 36.0, 43.0, 51.0],
+      "kind": "step",
+      "levels": [
+        {"free": {"grid": null, "lower": 0.0, "upper": null}},
+        {"free": {"grid": null, "lower": 0.0, "upper": null}},
+        {"free": {"grid": null, "lower": 0.0, "upper": null}},
+        {"free": {"grid": null, "lower": 0.0, "upper": null}},
+        {"free": {"grid": null, "lower": 0.0, "upper": null}}
+      ],
+      "monotone": true,
+      "tail": "upper"
+    },
+    "payout_unit": "USD",
+    "unit_id": ["u1", "u2"]
+  },
+  "expected": {
+    "metrics": {
+      "correlation": 0.946323029934,
+      "cvar_loss_b0_9": 1366712.4,
+      "cvar_loss_b0_99": 2069258.0,
+      "cvar_net_loss_b0_9": null,
+      "cvar_net_loss_b0_99": null,
+      "cvar_uncovered_b0_9": 390744.686539,
+      "cvar_uncovered_b0_99": 816731.85545,
+      "expected_loss": 271272.905,
+      "expected_payout": 217018.324,
+      "expected_uncovered": 71257.9008342,
+      "loss_rp10": 1157114.0,
+      "loss_rp2": 62787.0,
+      "loss_rp50": 1709026.0,
+      "net_loss_rp10": null,
+      "net_loss_rp2": null,
+      "net_loss_rp50": null,
+      "payout_rp10": 1252526.14455,
+      "payout_rp2": 88193.5737017,
+      "payout_rp50": 1252526.14455,
+      "payout_to_loss_ratio": 0.8,
+      "premium": 217018.324,
+      "rmse": 154005.457292,
+      "uncovered_rp10": 232473.324355,
+      "uncovered_rp2": 3325.70028566,
+      "uncovered_rp50": 456499.85545,
+      "var_loss_b0_9": 1157114.0,
+      "var_loss_b0_99": {"either": [1709026.0, 2069258.0]},
+      "var_net_loss_b0_9": null,
+      "var_net_loss_b0_99": null,
+      "var_uncovered_b0_9": 232473.324355,
+      "var_uncovered_b0_99": {"either": [456499.85545, 816731.85545]}
+    },
+    "objective_value": 23717680875.7,
+    "parameters": {
+      "u1": {
+        "levels[0]": 0.0,
+        "levels[1]": 1060.29971434,
+        "levels[2]": 126656.140546,
+        "levels[3]": 166906.748044,
+        "levels[4]": 750262.14455
+      },
+      "u2": {
+        "levels[0]": 0.0,
+        "levels[1]": 5046.37593054,
+        "levels[2]": 88193.5737017,
+        "levels[3]": 502264.0,
+        "levels[4]": 502264.0
+      }
+    },
+    "premium": 217018.324,
+    "unidentified": {"u1": [], "u2": ["levels[4]"]},
+    "unique": true
+  },
+  "generator": {
+    "commit": "cb9248d73138de9e0a61973050fedafa1c22a40e",
+    "core_version": "0.1.0",
+    "script": "parity/scripts/export_climada_fixtures.py"
+  },
+  "kind": "design",
+  "limit": {"rule": "largest_loss"},
+  "objective": {"kind": "mse"},
+  "pricing": {"kind": "pure"},
+  "sample": "samples/s2.json",
+  "scope": "joint",
+  "source": "core",
+  "tolerances": {
+    "metrics": 1e-06,
+    "objective_value": 1e-06,
+    "parameters": 1e-06,
+    "premium": 1e-06
+  }
+}

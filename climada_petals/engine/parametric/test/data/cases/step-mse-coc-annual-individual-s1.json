@@ -1,0 +1,142 @@
+{
+  "basis": {"kind": "annual", "n_years": 40, "route": "catalogue"},
+  "budget": {"ratio": 0.8},
+  "case_id": "step-mse-coc-annual-individual-s1",
+  "compare_parameters": "exact",
+  "cover": {
+    "index": {
+      "index_stat": null,
+      "kind": "table",
+      "parameters": null,
+      "source": "synthetic",
+      "tail": "upper",
+      "unit": "m/s",
+      "weight": null
+    },
+    "label": null,
+    "limit": {"rule": "largest_loss"},
+    "payout": {
+      "breakpoints": [25.0, 30.0, 36.0, 43.0, 51.0],
+      "kind": "step",
+      "levels": [
+        {"free": {"grid": null, "lower": 0.0, "upper": null}},
+        {"free": {"grid": null, "lower": 0.0, "upper": null}},
+        {"free": {"grid": null, "lower": 0.0, "upper": null}},
+        {"free": {"grid": null, "lower": 0.0, "upper": null}},
+        {"free": {"grid": null, "lower": 0.0, "upper": null}}
+      ],
+      "monotone": true,
+      "tail": "upper"
+    },
+    "payout_unit": "USD",
+    "unit_id": ["u1", "u2"]
+  },
+  "expected": {
+    "metrics": {
+      "u1": {
+        "correlation": 0.748826430857,
+        "cvar_loss_b0_9": 1778027.75,
+        "cvar_loss_b0_99": 2885098.0,
+        "cvar_net_loss_b0_9": 1285272.2492,
+        "cvar_net_loss_b0_99": 1963609.34669,
+        "cvar_uncovered_b0_9": 1095585.03336,
+        "cvar_uncovered_b0_99": 1741873.78669,
+        "expected_loss": 277169.45,
+        "expected_payout": 162917.13532,
+        "expected_uncovered": 148993.517092,
+        "loss_rp10": {"either": [632659.0, 853740.0]},
+        "loss_rp2": {"either": [12457.0, 15064.0]},
+        "loss_rp50": 2885098.0,
+        "net_loss_rp10": {"either": [512684.183366, 664844.346689]},
+        "net_loss_rp2": {"either": [221735.559999, 221739.559999]},
+        "net_loss_rp50": 1963609.34669,
+        "payout_rp10": 400474.753266,
+        "payout_rp2": 0.0,
+        "payout_rp50": 1143224.21331,
+        "payout_to_loss_ratio": 0.587788933159,
+        "premium": 221735.559999,
+        "rmse": 417630.462328,
+        "uncovered_rp10": {"either": [290948.623367, 443108.78669]},
+        "uncovered_rp2": {"either": [0.0, 4.0]},
+        "uncovered_rp50": 1741873.78669,
+        "var_loss_b0_9": {"either": [632659.0, 853740.0]},
+        "var_loss_b0_99": 2885098.0,
+        "var_net_loss_b0_9": {"either": [512684.183366, 664844.346689]},
+        "var_net_loss_b0_99": 1963609.34669,
+        "var_uncovered_b0_9": {"either": [290948.623367, 443108.78669]},
+        "var_uncovered_b0_99": 1741873.78669
+      },
+      "u2": {
+        "correlation": 0.803499446978,
+        "cvar_loss_b0_9": 525482.75,
+        "cvar_loss_b0_99": 861587.0,
+        "cvar_net_loss_b0_9": 340169.54039,
+        "cvar_net_loss_b0_99": 596246.900779,
+        "cvar_uncovered_b0_9": 291868.86039,
+        "cvar_uncovered_b0_99": 547946.220779,
+        "expected_loss": 60375.85,
+        "expected_payout": 31364.0779221,
+        "expected_uncovered": 36852.7915584,
+        "loss_rp10": {"either": [91365.0, 106695.0]},
+        "loss_rp2": {"either": [0.0, 192.0]},
+        "loss_rp50": 861587.0,
+        "net_loss_rp10": {"either": [133198.900779, 139665.68]},
+        "net_loss_rp2": {"either": [48300.68, 48492.68]},
+        "net_loss_rp50": 596246.900779,
+        "payout_rp10": {"either": [0.0, 313640.779221]},
+        "payout_rp2": 0.0,
+        "payout_rp50": 313640.779221,
+        "payout_to_loss_ratio": 0.519480519481,
+        "premium": 48300.68,
+        "rmse": 123592.193189,
+        "uncovered_rp10": {"either": [84898.220779, 91365.0]},
+        "uncovered_rp2": {"either": [0.0, 192.0]},
+        "uncovered_rp50": 547946.220779,
+        "var_loss_b0_9": {"either": [91365.0, 106695.0]},
+        "var_loss_b0_99": 861587.0,
+        "var_net_loss_b0_9": {"either": [133198.900779, 139665.68]},
+        "var_net_loss_b0_99": 596246.900779,
+        "var_uncovered_b0_9": {"either": [84898.220779, 91365.0]},
+        "var_uncovered_b0_99": 547946.220779
+      }
+    },
+    "objective_value": {"u1": 174415203064.0, "u2": 15275030217.3},
+    "parameters": {
+      "u1": {
+        "levels[0]": 0.0,
+        "levels[1]": 0.0,
+        "levels[2]": 200237.376633,
+        "levels[3]": 371278.439949,
+        "levels[4]": 1143224.21331
+      },
+      "u2": {
+        "levels[0]": 0.0,
+        "levels[1]": 0.0,
+        "levels[2]": 0.0,
+        "levels[3]": 313640.779221,
+        "levels[4]": 313640.779221
+      }
+    },
+    "premium": {"u1": 221735.559999, "u2": 48300.68},
+    "unidentified": {"u1": [], "u2": ["levels[4]"]},
+    "unique": true
+  },
+  "generator": {
+    "commit": "cb9248d73138de9e0a61973050fedafa1c22a40e",
+    "core_version": "0.1.0",
+    "script": "parity/scripts/export_climada_fixtures.py"
+  },
+  "kind": "design",
+  "limit": {"rule": "largest_loss"},
+  "objective": {"kind": "mse"},
+  "pricing": {"kind": "cost_of_capital", "q": 0.99, "rate": 0.06},
+  "sample": "samples/s1.json",
+  "scope": "individual",
+  "source": "core",
+  "tolerances": {
+    "metrics": 1e-06,
+    "objective_value": 1e-06,
+    "parameters": 1e-06,
+    "premium": 1e-06
+  }
+}
