@@ -635,7 +635,9 @@ class StepPayout(LinearInAmounts):
         levels : sequence of float or Free, optional
             The levels. Default: ``Free()`` for every step, a template.
         tail : {"upper", "lower"}, default "upper"
+            As in the class.
         monotone : bool, default True
+            As in the class.
 
         Returns
         -------
