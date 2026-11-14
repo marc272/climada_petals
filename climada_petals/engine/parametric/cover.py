@@ -521,8 +521,9 @@ class ParametricCover:
         Parameters
         ----------
         index : ParametricIndex
-            An index that has a column for every unit of the cover, matched
-            by unit id; other columns are not read.
+            An index on the cover's :class:`IndexDefinition`, with a column
+            for every unit of the cover, matched by unit id; other columns
+            are not read.
 
         Returns
         -------
@@ -535,13 +536,14 @@ class ParametricCover:
         UnresolvedParameterError
             If the cover is a template.
         ParametricInputError
-            If ``index`` lacks a unit of the cover.
+            If ``index`` is not on the cover's definition, or lacks a unit
+            of the cover.
         CoverDefinitionError
             If a user-defined payout returns payouts of another shape,
             negative or not finite ones, or ones above the unit's limit.
         """
         self.check_resolved()
-        values, columns = _index_columns(index, self.unit_id)
+        values, columns = _index_columns(index, self.unit_id, self.index)
         out = np.empty((values.shape[0], self.n_units))
         for position, unit in enumerate(self.unit_id):
             out[:, position] = self._unit_payout(unit, values[:, columns[position]])
@@ -894,16 +896,27 @@ def _check_limit(limit: object, payouts: Mapping[Hashable, PayoutFunction]) -> N
 
 
 def _index_columns(
-    index: Any, units: Sequence[Hashable]
+    index: Any, units: Sequence[Hashable], definition: IndexDefinition
 ) -> tuple[NDArray[np.float64], list[int]]:
-    """Return an index's values and the column of each of the cover's units."""
+    """Return an index's values and the column of each of the cover's units.
+
+    The index must be on ``definition``, the cover's.
+    """
     try:
         values = np.asarray(index.values, dtype=np.float64)
         index_units = list(index.unit_id)
+        index_definition = index.definition
     except (AttributeError, TypeError, ValueError) as exc:
         raise ParametricInputError(
-            f"index must be a ParametricIndex, with values and unit_id: {exc}"
+            "index must be a ParametricIndex, with values, unit_id and definition: "
+            f"{exc}"
         ) from exc
+    if index_definition != definition:
+        raise ParametricInputError(
+            f"the index is not on the cover's definition: it is on "
+            f"{index_definition!r}, and the cover pays on {definition!r}; build it "
+            "with ParametricIndex.from_definition(cover.index, ...)"
+        )
     if values.ndim != 2 or values.shape[1] != len(index_units):
         raise ParametricInputError(
             "the index's values must have one column per unit id, got shape "

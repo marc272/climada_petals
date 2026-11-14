@@ -368,14 +368,7 @@ class TestCover(unittest.TestCase):
     def test_payouts_need_the_covers_units(self) -> None:
         other, _ = array_index(np.zeros((2, 3)), np.zeros((2, 3)), [0, 1], 10)
         other = ParametricIndex(
-            values=other.values,
-            event_id=other.event_id,
-            event_name=other.event_name,
-            frequency=other.frequency,
-            event_year=other.event_year,
-            years=other.years,
-            unit_id=("A", "B", "C"),
-            coords=other.coords,
+            other.values, other.event_id, ("A", "B", "C"), other.definition
         )
         with self.assertRaisesRegex(ParametricInputError, "not the cover's"):
             self.cover.payout_matrix(other)

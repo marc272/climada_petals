@@ -32,11 +32,21 @@ from CLIMADA's ``Hazard``, ``TCTracks``, ``Exposures`` and ``Impact``:
   the lower tail of the index, and user-defined families through the
   :class:`PayoutFunction` protocol and :func:`register_payout`. Nothing is
   paid below the first threshold.
-* **Index:** :class:`ParametricIndex`, the hazard intensity at each exposure
-  point (:meth:`~ParametricIndex.from_hazard`) or the cat-in-a-circle
-  category from tracks (:meth:`~ParametricIndex.from_cat_in_circle`), with
-  each event's simulation year, read from the hazard's dates or event names
-  or given; :func:`split_years` for training and test years.
+* **Units:** :class:`InsuredUnits`, the exposure points that share one
+  payout function: one point, a group (a column such as ``region_id``, or
+  polygons) or the whole exposure set. A unit's loss sums ``imp_mat`` over
+  its points, and its payout maps back to them by value share.
+* **Index:** :class:`ParametricIndex`, one value per event and unit with its
+  :class:`IndexDefinition`, on any hazard: a statistic of a ``Hazard``'s
+  footprint over each unit (:meth:`~ParametricIndex.from_hazard`), the
+  cat-in-a-circle category from tracks
+  (:meth:`~ParametricIndex.from_cat_in_circle`), a user's table
+  (:meth:`~ParametricIndex.from_table`), or a cover's index on another
+  hazard set (:meth:`~ParametricIndex.from_definition`). Events are matched
+  on ``event_id`` (:meth:`~ParametricIndex.matched_to`). Simulation years
+  are attached with :meth:`~ParametricIndex.with_years`, read from the
+  dates or the event names or given; :func:`split_years` gives training
+  and test years.
 * **Objectives:** :class:`WeightedCVaR`, the tail objective
   ``alpha CVaR_beta(U) + (1 - alpha) E[U]`` of the uncovered loss ``U``,
   next to :class:`ExpectedUncovered` (``E[U]``) and
@@ -45,7 +55,7 @@ from CLIMADA's ``Hazard``, ``TCTracks``, ``Exposures`` and ``Impact``:
   optional dependency cvxpy.
 * **Calibration scope:** :func:`calibrate` chooses the levels of a step
   payout template (:meth:`StepPayout.uniform`) with ``scope="individual"``
-  (one design problem per exposure point) or ``scope="portfolio"`` (one
+  (one design problem per unit) or ``scope="portfolio"`` (one
   joint problem on the owner's total loss, so the units' payouts can offset
   each other's shortfalls), and returns a :class:`CalibrationResult`.
   Pricing: :class:`PurePremium` or :class:`CostOfCapitalLoad`, under a
@@ -64,9 +74,12 @@ from .cover import IndexDefinition, Limit, ParametricCover
 from .errors import (
     CalibrationError,
     CoverDefinitionError,
+    EventAlignmentError,
+    ImpactInputError,
     MissingDependencyError,
     ParametricError,
     ParametricInputError,
+    UnitMappingError,
     UnknownPayoutKindError,
     UnresolvedParameterError,
 )
@@ -87,6 +100,7 @@ from .payout import (
 )
 from .pricing import CostOfCapitalLoad, PurePremium
 from .riskmeasures import var_cvar
+from .units import InsuredUnits
 
 __all__ = [
     "SAFFIR_SIMPSON_KN",
@@ -97,9 +111,12 @@ __all__ = [
     "CostOfCapitalLoad",
     "CoverDefinitionError",
     "CoverProblem",
+    "EventAlignmentError",
     "ExpectedUncovered",
     "Free",
+    "ImpactInputError",
     "IndexDefinition",
+    "InsuredUnits",
     "Limit",
     "LinearInAmounts",
     "LinearPayout",
@@ -114,6 +131,7 @@ __all__ = [
     "PiecewiseLinearPayout",
     "PurePremium",
     "StepPayout",
+    "UnitMappingError",
     "UnknownPayoutKindError",
     "UnresolvedParameterError",
     "WeightedCVaR",

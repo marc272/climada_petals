@@ -16,210 +16,169 @@ with CLIMADA. If not, see <https://www.gnu.org/licenses/>.
 
 ---
 
-Parametric index: index values per event and insured unit.
+Parametric index: the value a cover pays on, per event and insured unit.
 
-:class:`ParametricIndex` holds the index of every event of a CLIMADA
-``Hazard`` at every insured unit (one exposure point each), aligned with the
-hazard's events, plus each event's simulation year, which the annual basis
-needs. Two builders:
+A :class:`ParametricIndex` holds one value per event and insured unit
+(:class:`~climada_petals.engine.parametric.units.InsuredUnits`), each
+event's ``event_id``, and the
+:class:`~climada_petals.engine.parametric.cover.IndexDefinition` of how the
+values were computed. Nothing in it is specific to a hazard type. Builders:
 
-* :meth:`ParametricIndex.from_hazard`: the hazard intensity at each exposure
-  point's assigned centroid (e.g. the maximum sustained wind, in m/s, for a
-  ``TropCyclone``).
-* :meth:`ParametricIndex.from_cat_in_circle`: the cat-in-a-circle index
-  from ``TCTracks``: the highest Saffir-Simpson category that a storm's
-  track reaches within ``radius_km`` of the exposure point. It reads the
-  tracks, not the wind field that drives the loss, so index and loss are
-  decoupled as in a real contract. The method and its track geometry are in
-  :mod:`~climada_petals.engine.parametric.index_tracks`.
+* :meth:`ParametricIndex.from_hazard`: a statistic of a ``Hazard``'s
+  intensity over each unit's centroids, ``index_stat`` as in ``cat_bonds``:
+  ``"at_centroid"`` (one-point units), ``"mean"`` (equal weights, or by
+  value), ``"max"``, or a percentile in ``[0, 100]``;
+* :meth:`ParametricIndex.from_cat_in_circle`: the cat-in-a-circle category
+  from tracks (:mod:`~climada_petals.engine.parametric.index_tracks`);
+* :meth:`ParametricIndex.from_table`: a user's table keyed on ``event_id``
+  and unit, such as station readings; the constructor takes arrays;
+* :meth:`ParametricIndex.from_definition`: a cover's index on another
+  hazard set.
 
-Simulation years
-----------------
-The annual basis groups events into simulation years, and the years of the
-hazard set include those without events. Both builders take them in three
-parts:
+CLIMADA specifics, each handled by a typed error or an explicit argument:
 
-* **Each event's year**, ``event_year``:
+* **Events are matched on** ``event_id``, never by position
+  (:meth:`ParametricIndex.rows_in`). An index from another hazard set than
+  the loss's is matched to its ``Impact`` with
+  :meth:`ParametricIndex.matched_to`, on ``event_id`` or ``event_name``.
+  Other events raise
+  :class:`~climada_petals.engine.parametric.errors.EventAlignmentError`.
+* **Zero means no recorded intensity** in the sparse ``Hazard.intensity``.
+  With ``absent_value``, every zero at a unit's centroids reads as that
+  value. A lower-tail index (``tail="lower"``, a drought index, say)
+  requires it, so it states what an absent reading means.
+* An ``Impact`` without ``imp_mat``, a ``frequency_unit`` other than
+  ``1/year``, and exposures with ``cover`` or ``deductible`` raise
+  :class:`~climada_petals.engine.parametric.errors.ImpactInputError`; two
+  points at one location, with centroids built from the points, make
+  ``TropCyclone.from_tracks`` return column indices of -1, which raises
+  :class:`~climada_petals.engine.parametric.errors.UnitMappingError`.
+  Build the centroids from unique coordinates.
 
-  - ``None`` or ``"date"`` (the default): the calendar year of
-    ``hazard.date``, as ``TropCyclone.from_tracks`` sets it for historical
-    tracks;
-  - ``"event_name"`` (opt-in): the year in the event names, which must
-    have the form ``<prefix>_<year>_<number>``: the year is the
-    second-to-last field between underscores, e.g. ``NA_9999_0`` (basin,
-    year, storm) for an IRIS storm. A name of any other form raises;
-  - an array of int, one year per event.
-
-* **The number of years** ``N``, ``n_years``: by default ``1 / frequency``,
-  which must then be the same for every event.
-* **The first year**, ``first_year``: the years are ``first_year`` to
-  ``first_year + N - 1``. Without it, the years start at the first event's
-  year, which is certain only if the events' years run over exactly ``N``
-  years. If they run over fewer, the years without events could lie before
-  the first event or after the last one: then the ``"event_name"`` route
-  raises, and the date and array routes keep their earlier behaviour,
-  starting at the first event's year, and log a warning.
-
-``years``, every simulation year, can replace ``n_years`` and
-``first_year``; giving it with either of them raises.
-
-The dates cannot carry the years of every hazard. A CLIMADA date holds the
-calendar years 1 to 9999 (:data:`datetime.MAXYEAR`), so not every year of a
-10,000-year synthetic catalogue, and the tracks of a synthetic catalogue
-often all start on one date. For such a hazard, read the years from the
-event names and state the first year: ``event_year="event_name",
-first_year=0`` for IRIS, which numbers its years 0 to 9,999. The members of
-an ensemble of perturbed tracks (``calc_perturbed_trajectories``) share
-their parent's date, and their names (``<parent>_gen<m>``) give no year:
-pass ``event_year`` as an array, giving member ``m`` of year ``y`` the year
-``y + m N``, where ``N`` is the number of years of the parent catalogue.
+Simulation years (transitional)
+-------------------------------
+Until the outcomes hold them, an index carries the simulation years of the
+annual basis and its events' frequencies, once
+:meth:`ParametricIndex.with_years` has attached them from the hazard or the
+impact. :func:`split_years` splits them into training and test years.
 """
 
 from __future__ import annotations
 
-import datetime as dt
+import copy
 import math
-import re
-from collections.abc import Hashable, Sequence
-from dataclasses import dataclass
-from typing import Any, Final, Literal, NamedTuple
+from collections.abc import Hashable, Mapping, Sequence
+from dataclasses import dataclass, field
+from typing import Any, Final
 
 import numpy as np
+import pandas as pd
 from numpy.typing import ArrayLike, NDArray
 
 from climada_petals.util.config import LOGGER
 
-from ._checks import check_int, check_real, finite_array, integer_array, read_only
-from .errors import ParametricInputError
+from ._checks import check_real, finite_array, integer_array, read_only
+from ._years import SimulationYears, YearSource, simulation_years
+from .cover import IndexDefinition
+from .errors import EventAlignmentError, ParametricInputError, UnitMappingError
 from .index_tracks import (
+    CAT_IN_CIRCLE,
     DEFAULT_TRACK_STEP_HOURS,
     SAFFIR_SIMPSON_KN,
     Metric,
     cat_in_circle,
+    cat_in_circle_arguments,
 )
+from .units import InsuredUnits
 
-__all__ = ["ParametricIndex", "YearSource", "split_years"]
+__all__ = ["HAZARD", "TABLE", "ParametricIndex", "YearSource", "split_years"]
 
-YearSource = Literal["date", "event_name"]
-"""Where the builders read each event's simulation year (module docstring)."""
+HAZARD: Final[str] = "hazard"
+"""The ``kind`` of an :class:`IndexDefinition` built by ``from_hazard``."""
 
-_FREQUENCY_RTOL: Final[float] = 1e-6
+TABLE: Final[str] = "table"
+"""The ``kind`` the docs suggest for a user's table (``from_table``)."""
 
-_EVENT_NAME_YEAR: Final[re.Pattern[str]] = re.compile(
-    r"(?P<prefix>.+)_(?P<year>[0-9]+)_(?P<number>[0-9]+)"
-)
-"""``<prefix>_<year>_<number>``, matched against the whole event name."""
+_HAZARD_PARAMETERS: Final[frozenset[str]] = frozenset({"absent_value", "haz_type"})
 
-_LAST_ORDINAL: Final[int] = dt.date.max.toordinal()
-"""Ordinal of 31 December 9999, the last date that ``datetime`` holds."""
-
-
-class _YearArgs(NamedTuple):
-    """The simulation-year arguments of the builders (module docstring)."""
-
-    event_year: ArrayLike | YearSource | None
-    years: ArrayLike | None
-    n_years: int | None
-    first_year: int | None
+_CHUNK: Final[int] = 1 << 22
+"""Most intensity values densified at once by :meth:`ParametricIndex.from_hazard`."""
 
 
 @dataclass(frozen=True, eq=False)
 class ParametricIndex:
-    """Index values per event and insured unit, aligned with a hazard's events.
+    """Index values per event and insured unit (module docstring).
 
-    Use :meth:`from_hazard` or :meth:`from_cat_in_circle` to build one from
-    CLIMADA objects; the constructor takes the arrays directly.
+    Use a builder (:meth:`from_hazard`, :meth:`from_cat_in_circle`,
+    :meth:`from_table`, :meth:`from_definition`); the constructor takes the
+    arrays directly.
 
     Parameters
     ----------
     values : array_like of float
         Index values, shape ``(n_events, n_units)``. Finite.
     event_id : array_like of int
-        The hazard's event ids, shape ``(n_events,)``, unique.
-    event_name : sequence of str
-        The hazard's event names, one per event.
-    frequency : array_like of float
-        Annual frequency of each event, > 0.
-    event_year : array_like of int
-        Simulation year of each event.
-    years : array_like of int
-        Every simulation year the hazard set represents, including years
-        without events. Unique; every event's year must be among them.
+        One id per event (row), unique.
     unit_id : sequence of hashable
-        One id per unit (column), unique: the exposures' index labels.
-    coords : array_like of float
-        Latitude and longitude of each unit, shape ``(n_units, 2)``, as in
-        ``Impact.coord_exp``.
-    unit : str, optional
-        Unit of the index values, e.g. ``"m/s"``.
-    definition : str, optional
-        What the index is, in words.
+        One id per unit (column), unique.
+    definition : IndexDefinition
+        How the values were computed. A cover pays on an index only if it
+        is the cover's definition.
+    event_name : sequence of str, optional
+        One name per event, for :meth:`matched_to` with ``on="event_name"``.
+    units : InsuredUnits, optional
+        The units the index was built on, with ``unit_id`` as their ids. An
+        ``Impact``'s loss is summed into them where the index meets it.
 
     Raises
     ------
     ParametricInputError
-        If an argument has the wrong shape or type, or the arrays disagree.
+        If an argument has the wrong shape or type, or two disagree.
     """
 
     values: NDArray[np.float64]
     event_id: NDArray[np.int64]
-    event_name: Sequence[str]
-    frequency: NDArray[np.float64]
-    event_year: NDArray[np.int64]
-    years: NDArray[np.int64]
     unit_id: Sequence[Hashable]
-    coords: NDArray[np.float64]
-    unit: str = ""
-    definition: str = ""
+    definition: IndexDefinition
+    event_name: Sequence[str] | None = field(default=None, kw_only=True)
+    units: InsuredUnits | None = field(default=None, kw_only=True)
+    _years: SimulationYears | None = field(default=None, init=False, repr=False)
 
     def __post_init__(self) -> None:
         """Validate the fields and store read-only copies."""
         values = finite_array(self.values, "values", 2)
         n_events, n_units = values.shape
         event_id = integer_array(self.event_id, "event_id")
-        frequency = finite_array(self.frequency, "frequency", 1)
-        event_year = integer_array(self.event_year, "event_year")
-        years = integer_array(self.years, "years")
-        names = tuple(str(name) for name in self.event_name)
-        for name, arr in (
-            ("event_id", event_id),
-            ("event_name", names),
-            ("frequency", frequency),
-            ("event_year", event_year),
-        ):
-            if len(arr) != n_events:
-                raise ParametricInputError(
-                    f"{name} has {len(arr)} entries for {n_events} events"
-                )
-        if np.unique(event_id).size != n_events:
-            raise ParametricInputError("event_id must be unique")
-        if np.any(frequency <= 0):
-            raise ParametricInputError("frequency must be > 0")
-        if years.size == 0 or np.unique(years).size != years.size:
-            raise ParametricInputError("years must be non-empty and unique")
-        stray = np.setdiff1d(event_year, years)
-        if stray.size:
+        if event_id.size != n_events or np.unique(event_id).size != n_events:
             raise ParametricInputError(
-                f"event years outside years, e.g. {stray[:5].tolist()}"
+                f"event_id must hold {n_events} unique ids, got {event_id.size}"
             )
         units = tuple(self.unit_id)
         if len(units) != n_units or len(set(units)) != n_units:
             raise ParametricInputError(
                 f"unit_id must hold {n_units} unique ids, got {len(units)}"
             )
-        coords = finite_array(self.coords, "coords", 2)
-        if coords.shape != (n_units, 2):
+        if not isinstance(self.definition, IndexDefinition):
             raise ParametricInputError(
-                f"coords must have shape ({n_units}, 2), got {coords.shape}"
+                f"definition must be an IndexDefinition, got {self.definition!r}"
+            )
+        names = None
+        if self.event_name is not None:
+            names = tuple(str(name) for name in self.event_name)
+            if len(names) != n_events:
+                raise ParametricInputError(
+                    f"event_name has {len(names)} entries for {n_events} events"
+                )
+        if self.units is not None and (
+            not isinstance(self.units, InsuredUnits) or self.units.unit_id != units
+        ):
+            raise ParametricInputError(
+                "units must be the InsuredUnits of the index's unit_id, in order"
             )
         object.__setattr__(self, "values", read_only(values))
         object.__setattr__(self, "event_id", read_only(event_id))
-        object.__setattr__(self, "event_name", names)
-        object.__setattr__(self, "frequency", read_only(frequency))
-        object.__setattr__(self, "event_year", read_only(event_year))
-        object.__setattr__(self, "years", read_only(np.sort(years)))
         object.__setattr__(self, "unit_id", units)
-        object.__setattr__(self, "coords", read_only(coords))
+        object.__setattr__(self, "event_name", names)
 
     @property
     def n_events(self) -> int:
@@ -230,6 +189,30 @@ class ParametricIndex:
     def n_units(self) -> int:
         """Number of insured units (columns)."""
         return int(self.values.shape[1])
+
+    @property
+    def years(self) -> NDArray[np.int64]:
+        """Every simulation year, sorted (:meth:`with_years`)."""
+        return self._simulation().years
+
+    @property
+    def event_year(self) -> NDArray[np.int64]:
+        """Simulation year of each event (:meth:`with_years`)."""
+        return self._simulation().event_year
+
+    @property
+    def frequency(self) -> NDArray[np.float64]:
+        """Annual frequency of each event (:meth:`with_years`)."""
+        return self._simulation().frequency
+
+    def _simulation(self) -> SimulationYears:
+        """Return the attached years, or raise if there are none."""
+        if self._years is None:
+            raise ParametricInputError(
+                "the index has no simulation years; attach them with "
+                "index.with_years(hazard_or_impact, ...)"
+            )
+        return self._years
 
     def event_mask(self, years: ArrayLike | None = None) -> NDArray[np.bool_]:
         """Return the events whose year is in ``years``.
@@ -247,7 +230,8 @@ class ParametricIndex:
         Raises
         ------
         ParametricInputError
-            If a year is not one of the index's years, or repeats.
+            If the index has no years, or a year is not one of them, or
+            repeats.
         """
         chosen = self.check_years(years)
         return np.isin(self.event_year, chosen)
@@ -268,7 +252,8 @@ class ParametricIndex:
         Raises
         ------
         ParametricInputError
-            If the years are empty, repeat or are not among :attr:`years`.
+            If the index has no years, or the years are empty, repeat or
+            are not among :attr:`years`.
         """
         if years is None:
             return self.years
@@ -282,178 +267,495 @@ class ParametricIndex:
             )
         return np.sort(chosen)
 
-    @classmethod
-    def from_hazard(
-        cls,
-        hazard: Any,
-        exposures: Any,
+    def rows_in(self, impact: Any) -> NDArray[np.intp]:
+        """Return the row of ``impact`` of each of the index's events, on ``event_id``.
+
+        Parameters
+        ----------
+        impact : climada.engine.Impact
+            An impact with the index's events, in any order.
+
+        Returns
+        -------
+        numpy.ndarray of int
+            Shape ``(n_events,)``: ``impact``'s rows in the index's order.
+
+        Raises
+        ------
+        EventAlignmentError
+            If the impact's events are not exactly the index's.
+        """
+        other = integer_array(np.asarray(impact.event_id), "impact.event_id")
+        position = _positions(other, "the impact's event_id")
+        rows = [position.get(int(key), -1) for key in self.event_id]
+        missing = rows.count(-1)
+        if missing or other.size != self.n_events:
+            raise EventAlignmentError(
+                f"the impact's event_id are not the index's events: the impact has "
+                f"{other.size} events and the index {self.n_events}, of which "
+                f"{missing} are not the impact's; match an index from another "
+                "hazard set with matched_to(impact)"
+            )
+        return np.asarray(rows, dtype=np.intp)
+
+    def matched_to(self, impact: Any, *, on: str = "event_id") -> ParametricIndex:
+        """Return the index on the impact's events, in the impact's order.
+
+        This is the stated event matching of an index from another hazard
+        set than the loss's (module docstring). Index events that the
+        impact lacks are left out and counted in a logged warning. The
+        result has the impact's ``event_id`` and ``event_name``, and no
+        simulation years: attach them after matching.
+
+        Parameters
+        ----------
+        impact : climada.engine.Impact
+            The loss, or anything with its ``event_id`` and ``event_name``.
+        on : {"event_id", "event_name"}, default "event_id"
+            The key that identifies an event in both. Tracks of one storm
+            set give two hazard sets the same names but, often, other ids.
+
+        Returns
+        -------
+        ParametricIndex
+
+        Raises
+        ------
+        ParametricInputError
+            If ``on`` is unknown, or the index has no event names.
+        EventAlignmentError
+            If the key repeats on either side, or an event of the impact
+            has no index value.
+        """
+        if on not in ("event_id", "event_name"):
+            raise ParametricInputError(
+                f"on must be 'event_id' or 'event_name', got {on!r}"
+            )
+        if on == "event_id":
+            own: list[Any] = self.event_id.tolist()
+            other: list[Any] = [int(key) for key in impact.event_id]
+        elif self.event_name is None:
+            raise ParametricInputError("the index has no event names to match on")
+        else:
+            own = list(self.event_name)
+            other = [str(key) for key in impact.event_name]
+        position = _positions(own, f"the index's {on}")
+        _positions(other, f"the impact's {on}")
+        missing = [key for key in other if key not in position]
+        if missing:
+            raise EventAlignmentError(
+                f"{len(missing)} of the impact's {len(other)} events have no index "
+                f"value ({on}), e.g. {missing[:5]}"
+            )
+        if len(own) > len(other):
+            LOGGER.warning(
+                "matched_to: %d of the index's %d events are not the impact's (%s) "
+                "and are left out",
+                len(own) - len(other),
+                len(own),
+                on,
+            )
+        rows = [position[key] for key in other]
+        names = [str(name) for name in impact.event_name]
+        return ParametricIndex(
+            self.values[rows],
+            np.asarray(impact.event_id),
+            self.unit_id,
+            self.definition,
+            event_name=names if len(names) == len(rows) else None,
+            units=self.units,
+        )
+
+    def with_years(
+        self,
+        source: Any,
         *,
         event_year: ArrayLike | YearSource | None = None,
         years: ArrayLike | None = None,
         n_years: int | None = None,
         first_year: int | None = None,
     ) -> ParametricIndex:
-        """Index = hazard intensity at each exposure point's assigned centroid.
+        """Return the index with simulation years and frequencies attached.
+
+        The years include those without events, in three parts:
+
+        * **each event's year**, ``event_year``: ``None`` or ``"date"``, the
+          calendar year of ``source.date``; ``"event_name"``, the year in
+          names ``<prefix>_<year>_<number>`` such as IRIS's ``NA_9999_0``
+          (another form raises); or one year per event of ``source``;
+        * **the number of years** ``N``, ``n_years``: by default
+          ``1 / frequency``, which must then be one value;
+        * **the first year**, ``first_year``. Without it, the years start
+          at the first event's year; if the events' years run over fewer
+          than ``N`` years, the ``"event_name"`` route raises, and the
+          others take the first event's year with a logged warning.
+
+        ``years``, every simulation year, can replace ``n_years`` and
+        ``first_year``. A date holds the years 1 to 9999 only, and a
+        synthetic catalogue's tracks often start on one date: use
+        ``event_year="event_name", first_year=0`` for IRIS. Members of an
+        ensemble share their parent's date: pass ``event_year`` as an
+        array, member ``m`` of year ``y`` in year ``y + m N``.
 
         Parameters
         ----------
-        hazard : climada.hazard.Hazard
-            The hazard, e.g. a ``TropCyclone``. Its events are the index's
-            events, in order.
-        exposures : climada.entity.Exposures
-            One point per insured unit. Uses the exposures' centroid column
-            for the hazard type (``centr_<haz_type>``) if it is set, and
-            otherwise assigns centroids on a copy (``assign_centroids``),
-            leaving ``exposures`` unchanged.
-        event_year : {"date", "event_name"} or array_like of int, optional
-            Each event's simulation year: from ``hazard.date`` (``None``,
-            the default, or ``"date"``), from ``hazard.event_name``
-            (``"event_name"``, names ``<prefix>_<year>_<number>``), or one
-            year per event.
-        years : array_like of int, optional
-            Every simulation year, including years without events. Not
-            together with ``n_years`` or ``first_year``.
-        n_years : int, optional
-            Number of simulation years, >= 1. Default: ``1 / frequency``.
-        first_year : int, optional
-            The first simulation year, in the numbering of the event years
-            (calendar years on the date route). Default: the first event's
-            year; if the events' years run over fewer than ``n_years``
-            years, the ``"event_name"`` route raises and the other routes
-            log a warning.
+        source : climada.hazard.Hazard or climada.engine.Impact
+            Holds every event of the index (matched on ``event_id``) with
+            its ``date``, ``event_name`` and ``frequency`` per year. Its
+            other events count for the span of the years.
+        event_year, years, n_years, first_year : optional
+            As above.
 
         Returns
         -------
         ParametricIndex
-            Index in ``hazard.units``.
+            The same index, with :attr:`years`, :attr:`event_year` and
+            :attr:`frequency`.
+
+        Raises
+        ------
+        ImpactInputError
+            If ``source.frequency_unit`` is not ``1/year``.
+        EventAlignmentError
+            If an event of the index is not in ``source``.
+        ParametricInputError
+            If the years cannot be derived or are ambiguous, or a frequency
+            is not positive.
+        """
+        rows, all_years, frequency = simulation_years(
+            source,
+            event_year=event_year,
+            years=years,
+            n_years=n_years,
+            first_year=first_year,
+        )
+        position = _positions(
+            integer_array(np.asarray(source.event_id), "event_id"), "event_id"
+        )
+        missing = [key for key in self.event_id.tolist() if key not in position]
+        if missing:
+            raise EventAlignmentError(
+                f"{len(missing)} of the index's events are not in the source of "
+                f"the years, e.g. {missing[:5]}"
+            )
+        index_rows = [position[key] for key in self.event_id.tolist()]
+        attached = SimulationYears.checked(
+            rows[index_rows], all_years, frequency[index_rows]
+        )
+        out = copy.copy(self)
+        object.__setattr__(out, "_years", attached)
+        return out
+
+    @classmethod
+    def from_hazard(
+        cls,
+        hazard: Any,
+        units: InsuredUnits,
+        *,
+        index_stat: str | float = "at_centroid",
+        weight: str | None = None,
+        tail: str = "upper",
+        absent_value: float | None = None,
+        source: str | None = None,
+    ) -> ParametricIndex:
+        """Index = a statistic of the hazard's intensity over each unit's centroids.
+
+        A unit's centroids are the distinct centroids its points are
+        assigned to (:meth:`InsuredUnits.centroids`). The hazard need not
+        be the one behind the loss: match another with :meth:`matched_to`.
+
+        Parameters
+        ----------
+        hazard : climada.hazard.Hazard
+            Any hazard type, with ``units`` set. Its events are the index's
+            events, in order.
+        units : InsuredUnits
+            The insured units.
+        index_stat : {"at_centroid", "mean", "max"} or float, default "at_centroid"
+            ``"at_centroid"``: the intensity at the assigned centroid, for
+            one-point units only. ``"mean"``: the mean over the unit's
+            centroids. ``"max"``: their maximum. A number in ``[0, 100]``:
+            that percentile, linearly interpolated (``numpy.percentile``).
+        weight : {"value"}, optional
+            ``"value"`` weights the ``"mean"`` by the total value of the
+            unit's points at each centroid. Default: equal weights per
+            centroid.
+        tail : {"upper", "lower"}, default "upper"
+            Which side of the index is severe.
+        absent_value : float, optional
+            What a zero (no recorded intensity) reads as. Required with
+            ``tail="lower"``. Default: zero stays zero.
+        source : str, optional
+            What the hazard set is, for the definition, e.g. its name.
+
+        Returns
+        -------
+        ParametricIndex
+            In ``hazard.units``, with the definition ``IndexDefinition("hazard",
+            unit=hazard.units, tail=tail, index_stat=index_stat,
+            weight=weight, source=source, parameters={"haz_type":
+            hazard.haz_type})``, and ``absent_value`` in the parameters if
+            given.
 
         Raises
         ------
         ParametricInputError
-            If an exposure point has no centroid, or the years cannot be
-            derived or are ambiguous (module docstring, "Simulation years").
+            If ``hazard.units`` is empty, the hazard has no events,
+            ``index_stat="at_centroid"`` meets a unit of several points, or
+            ``tail="lower"`` has no ``absent_value``.
+        CoverDefinitionError
+            If ``index_stat``, ``weight`` or ``tail`` is invalid.
+        UnitMappingError
+            If a point of a unit has no centroid in the hazard
+            (:meth:`InsuredUnits.centroids`).
         """
-        centroids = _assigned_centroids(hazard, exposures)
-        values = np.asarray(hazard.intensity[:, centroids].toarray(), dtype=float)
-        column = f"centr_{hazard.haz_type}"
-        return cls._from_climada(
-            values,
-            hazard,
-            exposures,
-            _YearArgs(event_year, years, n_years, first_year),
-            unit=str(hazard.units),
-            definition=(
-                f"intensity of the {hazard.haz_type} hazard at each exposure "
-                f"point's assigned centroid ({column})"
-            ),
+        if not isinstance(hazard.units, str) or not hazard.units:
+            raise ParametricInputError(
+                "hazard.units must name the unit of the intensity, e.g. 'm/s'; got "
+                f"{hazard.units!r}"
+            )
+        parameters: dict[str, Any] = {"haz_type": str(hazard.haz_type)}
+        if absent_value is not None:
+            parameters["absent_value"] = check_real("absent_value", absent_value)
+        definition = IndexDefinition(
+            HAZARD,
+            unit=hazard.units,
+            tail=tail,
+            index_stat=index_stat,
+            weight=weight,
+            source=source,
+            parameters=parameters,
         )
+        return cls._on_hazard(definition, hazard, units)
 
     @classmethod
-    def from_cat_in_circle(  # pylint: disable=too-many-arguments
+    def from_cat_in_circle(
         cls,
         tracks: Any,
-        exposures: Any,
+        units: InsuredUnits,
         *,
         hazard: Any,
         radius_km: float,
         metric: Metric = "category",
         breakpoints_kn: Sequence[float] = SAFFIR_SIMPSON_KN,
         track_step_hours: float | None = DEFAULT_TRACK_STEP_HOURS,
-        event_year: ArrayLike | YearSource | None = None,
-        years: ArrayLike | None = None,
-        n_years: int | None = None,
-        first_year: int | None = None,
     ) -> ParametricIndex:
-        """Cat-in-a-circle index from tracks (module docstring).
+        """Cat-in-a-circle index from tracks (:mod:`.index_tracks`).
 
         Parameters
         ----------
         tracks : climada.hazard.TCTracks
-            The storms' tracks, wind in knots. Every hazard event needs
-            exactly one track whose ``sid`` is the event's name (as
-            ``TropCyclone.from_tracks`` names its events).
-        exposures : climada.entity.Exposures
-            One point per insured unit.
+            The storms' tracks, one per hazard event, matched on the event
+            name (as ``TropCyclone.from_tracks`` names events).
+        units : InsuredUnits
+            The insured units. A unit of several points reads the track
+            within ``radius_km`` of any of them.
         hazard : climada.hazard.Hazard
-            Sets the events (order, ids, frequencies, dates), so that the
-            index is aligned with the hazard and with impacts computed from
-            it.
-        radius_km : float
-            Circle radius in km, > 0.
-        metric : {"category", "max_wind"}, default "category"
-            The category (0 to ``len(breakpoints_kn)``), or the wind in m/s.
-        breakpoints_kn : sequence of float, default SAFFIR_SIMPSON_KN
-            Strictly increasing, positive lower bounds of categories 1, 2,
-            ..., in knots. Used by ``"category"`` only.
-        track_step_hours : float or None, default 0.5
-            Interpolate the tracks to this time step before testing the
-            distance; None uses the track points as they are.
-        event_year, years, n_years, first_year : optional
-            Simulation years, as in :meth:`from_hazard` (module docstring,
-            "Simulation years").
+            Sets the events: their order, ids and names.
+        radius_km, metric, breakpoints_kn, track_step_hours
+            As in
+            :func:`~climada_petals.engine.parametric.index_tracks.cat_in_circle`.
 
         Returns
         -------
         ParametricIndex
-            The index, in categories or m/s.
+            The index, in categories or m/s, with the definition of
+            :func:`~climada_petals.engine.parametric.index_tracks.cat_in_circle`.
 
         Raises
         ------
         ParametricInputError
             If a parameter is out of range, a hazard event has no track or
-            two, a track's wind is not in knots, or the years cannot be
-            derived or are ambiguous.
+            two, or a track's wind is not in knots.
         """
-        values, unit, definition = cat_in_circle(
+        _check_units(units)
+        values, definition = cat_in_circle(
             tracks,
-            exposures,
+            units,
             hazard,
             radius_km=radius_km,
             metric=metric,
             breakpoints_kn=breakpoints_kn,
             track_step_hours=track_step_hours,
         )
-        return cls._from_climada(
-            values,
-            hazard,
-            exposures,
-            _YearArgs(event_year, years, n_years, first_year),
-            unit=unit,
-            definition=definition,
+        return cls._of_hazard_events(values, hazard, units, definition)
+
+    @classmethod
+    def from_table(
+        cls,
+        table: pd.DataFrame,
+        units: InsuredUnits,
+        *,
+        definition: IndexDefinition,
+        event_id: str = "event_id",
+        unit_id: str = "unit_id",
+        value: str = "value",
+    ) -> ParametricIndex:
+        """Index from a user's table in long form: one row per event and unit.
+
+        Parameters
+        ----------
+        table : pandas.DataFrame
+            One row per event and unit, in any order, with every unit for
+            every event. Units are matched on their ids as strings.
+        units : InsuredUnits
+            The insured units; the table names each of them.
+        definition : IndexDefinition
+            What the values are, e.g. ``IndexDefinition("table", unit="mm",
+            source="station readings")``.
+        event_id, unit_id, value : str
+            The columns of the event ids (integers), the unit ids and the
+            index values (finite).
+
+        Returns
+        -------
+        ParametricIndex
+            The events in ascending ``event_id``.
+
+        Raises
+        ------
+        ParametricInputError
+            If a column is missing, the table is empty, an event id is not
+            an integer, a value is not finite, or an event and unit appear
+            twice or not at all.
+        UnitMappingError
+            If the table names a unit that ``units`` doesn't hold.
+        """
+        _check_units(units)
+        columns = [event_id, unit_id, value]
+        if not isinstance(table, pd.DataFrame) or not set(columns) <= set(table):
+            raise ParametricInputError(
+                f"table must be a pandas DataFrame with the columns {columns}"
+            )
+        if table.empty:
+            raise ParametricInputError("the table has no rows")
+        events, cell = _table_cells(table[event_id], table[unit_id], units)
+        values = np.empty(events.size * units.n_units)
+        values[cell] = finite_array(table[value].to_numpy(), value, 1)
+        return cls(
+            values.reshape(events.size, units.n_units),
+            events,
+            units.unit_id,
+            definition,
+            units=units,
         )
 
     @classmethod
-    def _from_climada(
+    def from_definition(
+        cls,
+        definition: IndexDefinition,
+        hazard: Any,
+        units: InsuredUnits,
+        *,
+        tracks: Any = None,
+    ) -> ParametricIndex:
+        """Rebuild a cover's index on another hazard set (a scenario, say).
+
+        Parameters
+        ----------
+        definition : IndexDefinition
+            A definition that :meth:`from_hazard` (kind ``"hazard"``) or
+            :meth:`from_cat_in_circle` (kind ``"cat_in_circle"``) built, e.g.
+            ``cover.index``.
+        hazard : climada.hazard.Hazard
+            The hazard set: of the definition's ``haz_type`` and unit for a
+            hazard index; it sets the events of a cat-in-a-circle index.
+        units : InsuredUnits
+            The insured units.
+        tracks : climada.hazard.TCTracks, optional
+            The tracks of a cat-in-a-circle index; none for a hazard index.
+
+        Returns
+        -------
+        ParametricIndex
+            With ``definition`` as its definition.
+
+        Raises
+        ------
+        ParametricInputError
+            If the definition is of another kind (a table can't be rebuilt
+            from a hazard: use :meth:`from_table`), its parameters are not
+            the builder's, the hazard's type or unit differs from it, or
+            ``tracks`` is missing or not wanted.
+        """
+        if not isinstance(definition, IndexDefinition):
+            raise ParametricInputError(
+                f"definition must be an IndexDefinition, got {definition!r}"
+            )
+        if definition.kind == HAZARD and tracks is None:
+            return cls._on_hazard(definition, hazard, units)
+        if definition.kind == CAT_IN_CIRCLE and tracks is not None:
+            index = cls.from_cat_in_circle(
+                tracks, units, hazard=hazard, **cat_in_circle_arguments(definition)
+            )
+            if index.definition != definition:
+                raise ParametricInputError(
+                    "the definition is not the one from_cat_in_circle builds for "
+                    f"its parameters: {definition.to_dict()} against "
+                    f"{index.definition.to_dict()}"
+                )
+            return index
+        raise ParametricInputError(
+            f"an index of kind {definition.kind!r} can't be rebuilt from a hazard "
+            f"{'without' if tracks is None else 'with'} tracks; kind {HAZARD!r} takes "
+            f"no tracks, {CAT_IN_CIRCLE!r} needs them, and a table is read with "
+            "from_table"
+        )
+
+    @classmethod
+    def _on_hazard(
+        cls, definition: IndexDefinition, hazard: Any, units: InsuredUnits
+    ) -> ParametricIndex:
+        """Compute a hazard index from its definition (:meth:`from_hazard`)."""
+        _check_units(units)
+        parameters: Mapping[str, Any] = definition.parameters or {}
+        if (
+            set(parameters) - _HAZARD_PARAMETERS
+            or "haz_type" not in parameters
+            or definition.index_stat is None
+        ):
+            raise ParametricInputError(
+                "a hazard index definition has an index_stat and the parameters "
+                f"haz_type and, optionally, absent_value; got {definition.to_dict()}"
+            )
+        if (parameters["haz_type"], definition.unit) != (hazard.haz_type, hazard.units):
+            raise ParametricInputError(
+                f"the definition is on a {parameters['haz_type']!r} hazard in "
+                f"{definition.unit!r}; got {hazard.haz_type!r} in {hazard.units!r}"
+            )
+        absent = parameters.get("absent_value")
+        if definition.tail == "lower" and absent is None:
+            raise ParametricInputError(
+                "a lower-tail index needs absent_value: the reading that a zero "
+                "(no recorded intensity) stands for"
+            )
+        if not np.asarray(hazard.event_id).size:
+            raise ParametricInputError("the hazard has no events")
+        values = _footprint(
+            hazard,
+            units,
+            definition,
+            None if absent is None else check_real("absent_value", absent),
+        )
+        return cls._of_hazard_events(values, hazard, units, definition)
+
+    @classmethod
+    def _of_hazard_events(
         cls,
         values: NDArray[np.float64],
         hazard: Any,
-        exposures: Any,
-        year_args: _YearArgs,
-        *,
-        unit: str,
-        definition: str,
+        units: InsuredUnits,
+        definition: IndexDefinition,
     ) -> ParametricIndex:
-        """Attach the hazard's events, the years and the exposure points."""
-        frequency = np.asarray(hazard.frequency, dtype=float)
-        rows, all_years = _simulation_years(
-            hazard,
-            frequency,
-            event_year=year_args.event_year,
-            years=year_args.years,
-            n_years=year_args.n_years,
-            first_year=year_args.first_year,
-        )
+        """Return an index on the hazard's events, with their names."""
+        names = [str(name) for name in hazard.event_name]
         return cls(
-            values=values,
-            event_id=np.asarray(hazard.event_id),
-            event_name=tuple(str(name) for name in hazard.event_name),
-            frequency=frequency,
-            event_year=rows,
-            years=all_years,
-            unit_id=tuple(exposures.gdf.index),
-            coords=np.column_stack([exposures.latitude, exposures.longitude]),
-            unit=unit,
-            definition=definition,
+            values,
+            np.asarray(hazard.event_id),
+            units.unit_id,
+            definition,
+            event_name=names if len(names) == values.shape[0] else None,
+            units=units,
         )
 
 
@@ -506,230 +808,160 @@ def split_years(
     return index.years[:n_train].copy(), index.years[n_train:].copy()
 
 
-def _assigned_centroids(hazard: Any, exposures: Any) -> NDArray[np.intp]:
-    """Return the centroid of each exposure point, assigning on a copy if needed.
-
-    Raises
-    ------
-    ParametricInputError
-        If an exposure point has no centroid within CLIMADA's threshold.
-    """
-    try:
-        centroids = np.asarray(exposures.hazard_centroids(hazard.haz_type))
-    except ValueError:
-        assigned = exposures.copy()
-        assigned.assign_centroids(hazard)
-        centroids = np.asarray(assigned.hazard_centroids(hazard.haz_type))
-    centroids = centroids.astype(np.intp)
-    unassigned = np.flatnonzero(centroids < 0)
-    if unassigned.size:
-        labels = [exposures.gdf.index[i] for i in unassigned[:5]]
+def _check_units(units: object) -> None:
+    """Raise unless ``units`` is an :class:`InsuredUnits`."""
+    if not isinstance(units, InsuredUnits):
         raise ParametricInputError(
-            f"{unassigned.size} exposure points have no hazard centroid, e.g. {labels}"
+            "units must be InsuredUnits, e.g. InsuredUnits.points(exposures); got "
+            f"{type(units).__name__}"
         )
-    return centroids
 
 
-def _simulation_years(
-    hazard: Any,
-    frequency: NDArray[np.float64],
-    *,
-    event_year: ArrayLike | YearSource | None,
-    years: ArrayLike | None,
-    n_years: int | None,
-    first_year: int | None,
+def _table_cells(
+    event_ids: pd.Series, unit_ids: pd.Series, units: InsuredUnits
 ) -> tuple[NDArray[np.int64], NDArray[np.int64]]:
-    """Return each event's year and all years (module docstring).
+    """Return a table's events, sorted, and the flat cell of each row.
 
     Raises
     ------
+    UnitMappingError
+        If a row names a unit that ``units`` doesn't hold.
     ParametricInputError
-        If the event years cannot be read, ``years`` is given with
-        ``n_years`` or ``first_year``, the number of years is not given and
-        the frequencies differ, the event years do not fit the span, or, on
-        the ``"event_name"`` route, the first year is not given and the
-        event years do not determine it.
+        If an event id is not an integer, or an event and unit appear twice
+        or not at all.
     """
-    if years is not None and (n_years is not None or first_year is not None):
-        raise ParametricInputError(
-            "pass either years or n_years and first_year, not both"
-        )
-    rows, source = _event_years(hazard, event_year, frequency.size)
-    if years is not None:
-        return rows, integer_array(years, "years")
-    if rows.size == 0:
-        raise ParametricInputError("the hazard has no events")
-    count, count_source = _year_count(frequency, n_years)
-    # The event-name route is new and never guesses; the date and array
-    # routes keep their earlier result, with a warning (module docstring).
-    strict = isinstance(event_year, str) and event_year == "event_name"
-    first = _first_year(rows, count, first_year, source, count_source, strict=strict)
-    LOGGER.info(
-        "simulation years: %d years (%s) from %d, event years from %s",
-        count,
-        count_source,
-        first,
-        source,
+    by_text = {str(unit): k for k, unit in enumerate(units.unit_id)}
+    keys = [str(unit) for unit in unit_ids]
+    unknown = sorted({key for key in keys if key not in by_text})
+    if unknown:
+        raise UnitMappingError(f"the table names units not in units: {unknown[:5]}")
+    events, row = np.unique(
+        integer_array(event_ids.to_numpy(), str(event_ids.name)), return_inverse=True
     )
-    return rows, np.arange(first, first + count, dtype=np.int64)
+    cell = np.asarray(row).reshape(-1) * units.n_units + [by_text[k] for k in keys]
+    counts = np.bincount(cell, minlength=events.size * units.n_units)
+    for wrong, what in ((counts > 1, "twice"), (counts == 0, "not at all")):
+        if wrong.any():
+            first = int(np.flatnonzero(wrong)[0])
+            raise ParametricInputError(
+                f"{int(wrong.sum())} (event, unit) pairs appear {what} in the "
+                f"table, e.g. ({int(events[first // units.n_units])}, "
+                f"{units.unit_id[first % units.n_units]!r}); give every unit one "
+                "value per event"
+            )
+    return events, cell
 
 
-def _event_years(
-    hazard: Any,
-    event_year: ArrayLike | YearSource | None,
-    n_events: int,
-) -> tuple[NDArray[np.int64], str]:
-    """Return each event's year and where it was read (module docstring).
-
-    Raises
-    ------
-    ParametricInputError
-        If ``event_year`` is an unknown source, or the dates or the event
-        names do not give one year per event.
-    """
-    if event_year is None or (isinstance(event_year, str) and event_year == "date"):
-        return _years_of_dates(hazard.date, n_events), "the dates"
-    if isinstance(event_year, str):
-        if event_year == "event_name":
-            return _years_of_names(hazard.event_name), "the event names"
-        raise ParametricInputError(
-            "event_year must be 'date', 'event_name' or one year per event, "
-            f"got {event_year!r}"
+def _positions(keys: Sequence[Any] | NDArray[Any], what: str) -> dict[Any, int]:
+    """Return the position of each key; raise if a key repeats."""
+    listed = keys.tolist() if isinstance(keys, np.ndarray) else list(keys)
+    position = {key: k for k, key in enumerate(listed)}
+    if len(position) != len(listed):
+        raise EventAlignmentError(
+            f"{what} repeat: {len(listed) - len(position)} of {len(listed)} are "
+            "duplicates, so they don't identify the events"
         )
-    return integer_array(event_year, "event_year"), "event_year"
+    return position
 
 
-def _years_of_dates(dates: ArrayLike, n_events: int) -> NDArray[np.int64]:
-    """Return the calendar year of each event's date (proleptic ordinals).
+def _footprint(
+    hazard: Any,
+    units: InsuredUnits,
+    definition: IndexDefinition,
+    absent: float | None,
+) -> NDArray[np.float64]:
+    """Return the statistic of the intensity over each unit's centroids.
+
+    Units with the same number of distinct centroids are reduced together,
+    on blocks of events of at most :data:`_CHUNK` densified values.
 
     Raises
     ------
     ParametricInputError
-        If there is not one valid ordinal per event: a date holds the
-        calendar years 1 to 9999 only.
+        If ``"at_centroid"`` meets a unit of several points.
     """
-    days = np.asarray(dates, dtype=np.float64)
-    if (
-        days.shape != (n_events,)
-        or not np.all(np.isfinite(days))
-        or np.any(days < 1)
-        or np.any(days > _LAST_ORDINAL)
+    columns, weight, groups = _unit_centroids(
+        units, units.centroids(hazard), int(hazard.centroids.size), definition
+    )
+    intensity = hazard.intensity
+    out = np.empty((intensity.shape[0], units.n_units))
+    step = max(1, _CHUNK // columns.size)
+    for first in range(0, intensity.shape[0], step):
+        rows = slice(first, first + step)
+        block = intensity[rows][:, columns].toarray()
+        if absent is not None:
+            block[block == 0.0] = absent
+        for members, pairs in groups:
+            out[rows, members] = _statistic(
+                block[:, pairs], definition.index_stat, weight[pairs]
+            )
+    return out
+
+
+def _statistic(
+    values: NDArray[np.float64], stat: str | float | None, weight: NDArray[np.float64]
+) -> NDArray[np.float64]:
+    """Reduce ``values`` over its last axis by ``stat``, a unit's centroids."""
+    if stat == "mean":
+        return (values * weight).sum(axis=2)
+    if isinstance(stat, str):
+        return values.max(axis=2)
+    return np.percentile(values, stat, axis=2)
+
+
+def _unit_centroids(
+    units: InsuredUnits,
+    centroid: NDArray[np.intp],
+    n_centroids: int,
+    definition: IndexDefinition,
+) -> tuple[
+    NDArray[np.intp],
+    NDArray[np.float64],
+    list[tuple[NDArray[np.intp], NDArray[np.intp]]],
+]:
+    """Return the pairs of a unit and one of its distinct centroids.
+
+    Returns
+    -------
+    columns : numpy.ndarray of int
+        The centroid of each pair, the pairs sorted by unit.
+    weight : numpy.ndarray of float
+        Each pair's weight in its unit's mean: equal, or the value of the
+        unit's points at the centroid; they sum to 1 per unit.
+    groups : list of (members, pairs)
+        Per number ``m`` of centroids, the units that have ``m`` and their
+        pairs, shape ``(len(members), m)``.
+
+    Raises
+    ------
+    ParametricInputError
+        If ``"at_centroid"`` meets a unit of several points.
+    """
+    unit_of = units.point_unit
+    inside = unit_of >= 0
+    if definition.index_stat == "at_centroid" and np.any(
+        np.bincount(unit_of[inside]) != 1
     ):
         raise ParametricInputError(
-            "hazard.date must hold one ordinal date (1 to "
-            f"{_LAST_ORDINAL}) per event to give the event years, and a date "
-            f"holds the calendar years 1 to {dt.MAXYEAR} only; pass event_year: "
-            "'event_name' to read the years from the event names, or one year "
-            "per event"
+            "index_stat='at_centroid' takes units of one point each; for groups "
+            "use 'mean', 'max' or a percentile"
         )
-    unique, position = np.unique(days.astype(np.int64), return_inverse=True)
-    calendar = np.array(
-        [dt.date.fromordinal(int(day)).year for day in unique], dtype=np.int64
+    pairs, inverse = np.unique(
+        unit_of[inside].astype(np.int64) * n_centroids + centroid[inside],
+        return_inverse=True,
     )
-    return calendar[np.asarray(position).reshape(-1)]
-
-
-def _years_of_names(names: Sequence[object]) -> NDArray[np.int64]:
-    """Return the year in each event name ``<prefix>_<year>_<number>``.
-
-    Raises
-    ------
-    ParametricInputError
-        If a name has another form.
-    """
-    texts = [str(name) for name in names]
-    found = [_EVENT_NAME_YEAR.fullmatch(text) for text in texts]
-    bad = [text for text, match in zip(texts, found, strict=True) if match is None]
-    if bad:
-        raise ParametricInputError(
-            f"{len(bad)} event names do not have the form "
-            "<prefix>_<year>_<number> (e.g. NA_9999_0), so they give no year, "
-            f"e.g. {bad[:5]}; pass event_year as one year per event"
+    pair_unit = pairs // n_centroids
+    share = np.ones(pairs.size)
+    if definition.weight == "value":
+        share = np.bincount(
+            np.asarray(inverse).reshape(-1), weights=units.value[inside]
         )
-    return np.array(
-        [int(match["year"]) for match in found if match is not None], dtype=np.int64
-    )
-
-
-def _year_count(frequency: NDArray[np.float64], n_years: int | None) -> tuple[int, str]:
-    """Return the number of simulation years and where it comes from.
-
-    Raises
-    ------
-    ParametricInputError
-        If ``n_years`` is not an int >= 1, or it is not given and the
-        frequencies are not all ``1 / N`` for one ``N``.
-    """
-    if n_years is not None:
-        return check_int("n_years", n_years, low=1), "n_years"
-    implied = 1.0 / frequency
-    count = round(float(np.median(implied)))
-    if count < 1 or not np.allclose(implied, count, rtol=_FREQUENCY_RTOL, atol=0):
-        raise ParametricInputError(
-            "cannot derive the number of simulation years from frequencies "
-            f"between {frequency.min():.6g} and {frequency.max():.6g}; pass "
-            "n_years or years"
-        )
-    return count, "1 / frequency"
-
-
-def _first_year(
-    rows: NDArray[np.int64],
-    count: int,
-    first_year: int | None,
-    source: str,
-    count_source: str,
-    *,
-    strict: bool,
-) -> int:
-    """Return the first simulation year (module docstring).
-
-    Without ``first_year``, the first event's year if the event years run
-    over exactly ``count`` years. If they run over fewer, the first event's
-    year is a guess: with ``strict`` it raises, otherwise it logs a warning
-    and returns the first event's year.
-
-    Raises
-    ------
-    ParametricInputError
-        If an event year lies outside the stated span, the event years run
-        over more than ``count`` years, or ``strict`` and they run over
-        fewer without ``first_year``.
-    """
-    if first_year is not None:
-        first = check_int("first_year", first_year)
-        outside = np.unique(rows[(rows < first) | (rows >= first + count)])
-        if outside.size:
-            raise ParametricInputError(
-                f"event years ({source}) outside the {count} simulation years "
-                f"{first} to {first + count - 1} (first_year, {count_source}), "
-                f"e.g. {outside[:5].tolist()}"
-            )
-        return first
-    low, high = int(rows.min()), int(rows.max())
-    span = high - low + 1
-    if span == count:
-        return low
-    if span < count:
-        gap = (
-            f"the event years ({source}) run from {low} to {high}, {span} "
-            f"years, but there are {count} simulation years ({count_source}): "
-            f"the {count - span} years without events could lie before {low} "
-            f"or after {high}"
-        )
-        if strict:
-            raise ParametricInputError(
-                f"{gap}. Pass first_year, the first simulation year, or years"
-            )
-        LOGGER.warning(
-            "%s. Taking the first event's year, %d, as the first simulation "
-            "year; pass first_year to state it",
-            gap,
-            low,
-        )
-        return low
-    raise ParametricInputError(
-        f"the event years ({source}) run from {low} to {high}, {span} years, "
-        f"more than the {count} simulation years ({count_source}); pass "
-        "n_years and first_year, or years"
-    )
+    share = share / np.bincount(pair_unit, weights=share)[pair_unit]
+    sizes = np.bincount(pair_unit)
+    starts = np.cumsum(sizes) - sizes
+    groups = [
+        (members, starts[members][:, None] + np.arange(size))
+        for size in np.unique(sizes)
+        for members in [np.flatnonzero(sizes == size)]
+    ]
+    return pairs % n_centroids, share, groups

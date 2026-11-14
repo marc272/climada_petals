@@ -28,9 +28,12 @@ from __future__ import annotations
 __all__ = [
     "CalibrationError",
     "CoverDefinitionError",
+    "EventAlignmentError",
+    "ImpactInputError",
     "MissingDependencyError",
     "ParametricError",
     "ParametricInputError",
+    "UnitMappingError",
     "UnknownPayoutKindError",
     "UnresolvedParameterError",
 ]
@@ -46,6 +49,33 @@ class ParametricInputError(ParametricError, ValueError):
     Examples: index values that are not finite, an ``Impact`` whose events
     are not the index's events, or frequencies that do not fit the annual
     basis.
+    """
+
+
+class UnitMappingError(ParametricInputError):
+    """Exposure points don't map onto insured units as a cover needs.
+
+    Examples: a unit with no point or with zero total value, a point in two
+    units, a polygon that holds no exposure point, or a point whose assigned
+    hazard centroid is not a column of the hazard's intensity matrix.
+    """
+
+
+class EventAlignmentError(ParametricInputError):
+    """An index and an ``Impact`` don't hold the same events.
+
+    Events are matched on ``event_id`` (or on a stated key), never by
+    position.
+    """
+
+
+class ImpactInputError(ParametricInputError):
+    """A CLIMADA ``Impact``, or what it was computed from, can't be used as it is.
+
+    Examples: an ``Impact`` without ``imp_mat`` (compute it with
+    ``save_mat=True``), a ``frequency_unit`` other than ``1/year``, exposures
+    with ``cover`` or ``deductible`` (their losses are already net of an
+    indemnity layer), or negative losses.
     """
 
 

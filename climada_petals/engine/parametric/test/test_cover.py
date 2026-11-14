@@ -338,7 +338,9 @@ class TestParametricCover(unittest.TestCase):
             unit_id=["U1"],
             payout_unit="EUR",
         )
-        stand_in = SimpleNamespace(values=[[0.0], [-1.5], [-3.0]], unit_id=("U1",))
+        stand_in = SimpleNamespace(
+            values=[[0.0], [-1.5], [-3.0]], unit_id=("U1",), definition=DROUGHT
+        )
         np.testing.assert_array_equal(
             drought.payout_matrix(stand_in), [[0], [60], [60]]
         )
@@ -346,18 +348,40 @@ class TestParametricCover(unittest.TestCase):
     def test_payout_matrix_checks_the_index(self) -> None:
         cover = _cover()
         bad: list[Any] = [
-            SimpleNamespace(values=np.zeros((2, 1)), unit_id=["u1"]),
-            SimpleNamespace(values=np.zeros((2, 2)), unit_id=["u1"]),
-            SimpleNamespace(values=np.zeros(2), unit_id=["u1", "u2"]),
-            SimpleNamespace(values=[["a", "b"]], unit_id=["u1", "u2"]),
+            SimpleNamespace(values=np.zeros((2, 1)), unit_id=["u1"], definition=WIND),
+            SimpleNamespace(values=np.zeros((2, 2)), unit_id=["u1"], definition=WIND),
+            SimpleNamespace(values=np.zeros(2), unit_id=["u1", "u2"], definition=WIND),
+            SimpleNamespace(values=[["a", "b"]], unit_id=["u1", "u2"], definition=WIND),
+            SimpleNamespace(values=np.zeros((2, 2)), unit_id=["u1", "u2"]),
             np.zeros((2, 2)),
         ]
         for index in bad:
             with self.subTest(index=index), self.assertRaises(ParametricInputError):
                 cover.payout_matrix(index)
 
+    def test_payout_matrix_needs_the_covers_definition(self) -> None:
+        values = [[20.0, 30.0], [45.0, 25.0]]
+        on_wind, _ = array_index(values, np.zeros((2, 2)), [0, 1], 10)
+        cover = _cover(unit_id=["U0", "U1"], payout=StepPayout([30.0], [100.0]))
+        np.testing.assert_array_equal(
+            cover.payout_matrix(on_wind), [[0, 100], [100, 0]]
+        )
+        for other in (
+            IndexDefinition("table", unit="km/h", source="synthetic"),
+            IndexDefinition("table", unit="m/s"),
+            IndexDefinition("hazard", unit="m/s", index_stat="max", source="synthetic"),
+        ):
+            index, _ = array_index(
+                values, np.zeros((2, 2)), [0, 1], 10, definition=other
+            )
+            with (
+                self.subTest(other=other),
+                self.assertRaisesRegex(ParametricInputError, "cover's definition"),
+            ):
+                cover.payout_matrix(index)
+
     def test_user_payouts_are_checked_where_they_pay(self) -> None:
-        index = SimpleNamespace(values=[[1.0], [3.0]], unit_id=["u1"])
+        index = SimpleNamespace(values=[[1.0], [3.0]], unit_id=["u1"], definition=WIND)
         within = ParametricCover(
             WIND, _Doubling(), unit_id=["u1"], payout_unit="USD", limit=Limit(6.0)
         )

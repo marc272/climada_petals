@@ -24,9 +24,10 @@ the losses of a CLIMADA ``Impact``, given a
 **scope** says which units share a design problem:
 
 ``"individual"``
-    One design problem per unit (exposure point): its own objective on its
-    own loss and payout, its own budget ``premium_j <= budget * E[L_j]``
-    and its own premium.
+    One design problem per unit (an exposure point or a group of them,
+    :class:`~climada_petals.engine.parametric.units.InsuredUnits`): its own
+    objective on its own loss and payout, its own budget
+    ``premium_j <= budget * E[L_j]`` and its own premium.
 ``"portfolio"``
     One joint design problem for one risk owner: one payout function per
     unit, but the objective is on the owner's **total** loss and payout,
@@ -64,7 +65,6 @@ from typing import Any, Final, Literal, NamedTuple, get_args
 
 import numpy as np
 import pandas as pd
-import scipy.sparse as sp
 from numpy.typing import ArrayLike, NDArray
 
 from climada_petals.util.config import LOGGER
@@ -98,7 +98,6 @@ SCOPES: Final[tuple[str, ...]] = get_args(Scope)
 PORTFOLIO: Final[str] = "portfolio"
 """``problem_id`` of the portfolio scope's single design problem."""
 
-_COORD_ATOL: Final[float] = 1e-9
 _FREQUENCY_RTOL: Final[float] = 1e-9
 
 
@@ -255,9 +254,12 @@ class CalibrationResult:
         Returns
         -------
         climada.engine.Impact
-            ``imp_mat`` holds the payout per event and unit, ``at_event``
-            its sum over the units, ``eai_exp`` the expected annual payout
-            per unit and ``aai_agg`` their sum, so that CLIMADA's tools
+            ``imp_mat`` holds the payout per event and exposure point, a
+            unit's payout shared among its points by value share
+            (:meth:`~climada_petals.engine.parametric.units.InsuredUnits.to_points`),
+            in the impact's event order; ``at_event`` is its sum over the
+            points, ``eai_exp`` the expected annual payout per point and
+            ``aai_agg`` their sum, so that CLIMADA's tools
             (``calc_freq_curve``, ``impact_per_year``, the plots) work on
             the payouts as on the loss.
 
@@ -267,23 +269,26 @@ class CalibrationResult:
             If ``impact`` does not match ``index`` (see :func:`loss_matrix`).
         """
         loss_matrix(index, impact)
-        payout = self.payout_matrix(index)
+        payout = np.empty((index.n_events, len(self.unit_id)))
+        payout[index.rows_in(impact)] = self.payout_matrix(index)
+        points = index.units.to_points(payout)
+        frequency = np.asarray(impact.frequency, dtype=float)
+        eai_exp = np.asarray(points.T @ frequency, dtype=float)
         impact_class = type(impact)
-        eai_exp = index.frequency @ payout
         return impact_class(
             event_id=np.asarray(impact.event_id),
             event_name=list(impact.event_name),
             date=np.asarray(impact.date),
-            frequency=np.asarray(impact.frequency),
+            frequency=frequency,
             frequency_unit=impact.frequency_unit,
             coord_exp=np.asarray(impact.coord_exp),
             crs=impact.crs,
             eai_exp=eai_exp,
-            at_event=payout.sum(axis=1),
+            at_event=np.asarray(points.sum(axis=1), dtype=float).reshape(-1),
             tot_value=impact.tot_value,
             aai_agg=float(eai_exp.sum()),
             unit=impact.unit,
-            imp_mat=sp.csr_matrix(payout),
+            imp_mat=points,
             haz_type=impact.haz_type,
         )
 
@@ -344,54 +349,48 @@ def loss_matrix(index: ParametricIndex, impact: Any) -> NDArray[np.float64]:
     Parameters
     ----------
     index : ParametricIndex
-        The index.
+        The index, with its :class:`~climada_petals.engine.parametric.units.InsuredUnits`
+        and its simulation years (``with_years``).
     impact : climada.engine.Impact
-        Computed with ``save_mat=True`` for the index's hazard events and
-        exposure points, e.g. ``ImpactCalc(exposures, impfset,
-        hazard).impact(save_mat=True)``.
+        Computed with ``save_mat=True`` on the units' exposure points, for
+        the index's events in any order, e.g. ``ImpactCalc(exposures,
+        impfset, hazard).impact(save_mat=True)``.
 
     Returns
     -------
     numpy.ndarray
-        ``impact.imp_mat`` as a dense ``(n_events, n_units)`` array.
+        ``impact.imp_mat`` summed over each unit's points, as a dense
+        ``(n_events, n_units)`` array in the index's event order: the events
+        are matched on ``event_id``.
 
     Raises
     ------
     ParametricInputError
-        If the impact has no ``imp_mat``, or its events, frequencies or
-        exposure coordinates are not the index's, or a loss is negative or
-        not finite.
+        If the index has no units or no simulation years, or the impact's
+        frequencies are not the index's.
+    ImpactInputError
+        If the impact has no ``imp_mat``, its ``frequency_unit`` is not
+        ``1/year``, its exposure points are not the units', or a loss is
+        negative or not finite.
+    EventAlignmentError
+        If the impact's events are not the index's.
     """
-    matrix = impact.imp_mat
-    shape = (index.n_events, index.n_units)
-    if matrix is None or tuple(matrix.shape) != shape:
+    units = index.units
+    if units is None:
         raise ParametricInputError(
-            f"impact.imp_mat must have shape {shape} (events x exposure points); "
-            f"got {None if matrix is None else tuple(matrix.shape)}. Compute the "
-            "impact with save_mat=True"
+            "the index has no InsuredUnits to sum the impact's exposure points "
+            "into; build it with a ParametricIndex builder, or pass units="
         )
-    if not np.array_equal(np.asarray(impact.event_id), index.event_id):
-        raise ParametricInputError("the impact's event_id are not the index's events")
+    units.check_impact(impact)
+    rows = index.rows_in(impact)
     if not np.allclose(
-        np.asarray(impact.frequency, dtype=float),
+        np.asarray(impact.frequency, dtype=float)[rows],
         index.frequency,
         rtol=_FREQUENCY_RTOL,
         atol=0.0,
     ):
         raise ParametricInputError("the impact's frequencies are not the index's")
-    coords = np.asarray(impact.coord_exp, dtype=float)
-    if coords.shape != index.coords.shape or not np.allclose(
-        coords, index.coords, rtol=0.0, atol=_COORD_ATOL
-    ):
-        raise ParametricInputError(
-            "the impact's exposure coordinates (coord_exp) are not the index's units"
-        )
-    loss = finite_array(
-        matrix.toarray() if sp.issparse(matrix) else matrix, "imp_mat", 2
-    )
-    if np.any(loss < 0):
-        raise ParametricInputError("the impact holds negative losses")
-    return loss
+    return units.aggregate(impact.imp_mat)[rows].toarray()
 
 
 def _check_objective(objective: object) -> Objective:
