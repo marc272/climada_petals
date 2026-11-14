@@ -31,6 +31,7 @@ from climada_petals.engine.parametric import (
     CostOfCapitalLoad,
     ExpectedUncovered,
     ParametricInputError,
+    PurePremium,
     StepPayout,
     WeightedCVaR,
     basis_risk,
@@ -127,6 +128,30 @@ class TestBasisRisk(unittest.TestCase):
         other, _ = random_portfolio(5, n_events=60, n_units=2, n_years=90)
         with self.assertRaisesRegex(ParametricInputError, "not the cover's"):
             basis_risk(other, cover, beta=0.9)
+
+    def test_a_cover_that_pays_at_zero_on_left_out_events_is_refused(self) -> None:
+        # The third event has no loss and an index of 0: the sample leaves it out.
+        sample, _ = array_sample(
+            [[30.0], [60.0], [0.0]], [[4.0], [10.0], [0.0]], [0, 1, 2], 10
+        )
+        fields = {
+            "payout": StepPayout.uniform(0.0, 70.0, 2),
+            "objective": ExpectedUncovered(),
+            "pricing": PurePremium(),
+            "scope": "individual",
+            "basis": "annual",
+            "budget": None,
+            "unit_id": ("U0",),
+            "levels": [[1.0, 5.0]],
+            "problems": (),
+            "calibration_years": None,
+        }
+        with self.assertRaisesRegex(ParametricInputError, "left out 1 events"):
+            basis_risk(sample, CalibrationResult(**fields), beta=0.9)
+        # A cover whose first level is 0 pays nothing at an index of 0.
+        unpaid = CalibrationResult(**{**fields, "levels": [[0.0, 5.0]]})
+        frame = basis_risk(sample, unpaid, beta=0.9)
+        self.assertAlmostEqual(frame["expected_payout"].iloc[-1], 0.5)
 
     def test_on_the_event_basis_n_years_is_null(self) -> None:
         cover = self._cover("individual")

@@ -61,9 +61,10 @@ from numpy.typing import ArrayLike, NDArray
 from ._checks import check_level
 from .calibrate import PORTFOLIO, CalibrationResult
 from .errors import ParametricInputError
+from .index import ParametricIndex
 from .measure import OutcomeMeasure
 from .riskmeasures import var_cvar
-from .sample import OutcomeSample
+from .sample import OutcomeSample, check_left_out_unpaid
 
 __all__ = ["METRICS", "basis_risk", "subject_metrics"]
 
@@ -191,8 +192,10 @@ def basis_risk(
     ------
     ParametricInputError
         If ``sample`` is not an ``OutcomeSample``, its units are not the
-        cover's, or it is on the event basis with frequencies that sum to
-        more than 1 per year.
+        cover's, it is on the event basis with frequencies that sum to more
+        than 1 per year, or it left events out and the cover pays at an
+        index of 0
+        (:func:`~climada_petals.engine.parametric.sample.check_left_out_unpaid`).
     """
     if not isinstance(sample, OutcomeSample):
         raise ParametricInputError(
@@ -200,6 +203,10 @@ def basis_risk(
         )
     level = check_level("beta", beta)
     payout = cover.payout_matrix(sample.index)[sample.event_row]
+    zero = ParametricIndex(
+        np.zeros((1, sample.n_units)), [0], sample.unit_id, sample.index.definition
+    )
+    check_left_out_unpaid(sample, cover.payout_matrix(zero))
     loss = sample.loss.toarray()
     measure = sample.measure.as_probability()
     rows = _unit_rows(cover, loss, payout, measure, unit_id=sample.unit_id, beta=level)

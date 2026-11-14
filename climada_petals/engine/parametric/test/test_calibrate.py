@@ -397,6 +397,22 @@ class TestInputs(unittest.TestCase):
             ):
                 calibrate(sample, payout=payout, **good)
 
+    def test_a_payout_that_pays_at_zero_on_left_out_events_is_refused(self) -> None:
+        # The third event has no loss and an index of 0: the sample leaves it out.
+        sample, _ = array_sample(
+            [[30.0], [60.0], [0.0]], [[4.0], [10.0], [0.0]], [0, 1, 2], 10
+        )
+        self.assertEqual(sample.n_left_out, 1)
+        good = {"objective": ExpectedUncovered(), "budget": 0.5}
+        at_zero = StepPayout.uniform(0.0, 70.0, 2)
+        with self.assertRaisesRegex(ParametricInputError, "left out 1 events"):
+            calibrate(sample, payout=at_zero, **good)
+        # A payout with nothing at an index of 0 goes ahead.
+        cover = calibrate(sample, payout=StepPayout.uniform(20.0, 70.0, 2), **good)
+        self.assertAlmostEqual(cover.problems[0].objective_value, 0.7, places=9)
+        # So does one at 0 on a sample that left nothing out.
+        calibrate(_hand_example(), payout=at_zero, **good)
+
     def test_years_without_events_raise(self) -> None:
         sample, _ = array_sample([[30.0]], [[1.0]], [0], 10)
         with self.assertRaisesRegex(ParametricInputError, "no event"):

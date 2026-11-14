@@ -79,7 +79,7 @@ from .objectives import ExpectedUncovered, MeanSquaredError, Objective, Weighted
 from .parameters import Free
 from .payout import StepPayout
 from .pricing import CostOfCapitalLoad, Pricing, PurePremium
-from .sample import OutcomeSample
+from .sample import OutcomeSample, check_left_out_unpaid
 from .solvers import DesignData, SolverInfo, solve_design
 from .units import InsuredUnits
 
@@ -542,8 +542,10 @@ def calibrate(
     Raises
     ------
     ParametricInputError
-        If an argument is invalid, or the sample is on the event basis with
-        frequencies that sum to more than 1 per year.
+        If an argument is invalid, the sample is on the event basis with
+        frequencies that sum to more than 1 per year, or the sample left
+        events out and the payout's first breakpoint is at or below 0
+        (:func:`~climada_petals.engine.parametric.sample.check_left_out_unpaid`).
     CalibrationError
         If a design problem is not solved to optimality. No problem is
         skipped.
@@ -566,6 +568,8 @@ def calibrate(
     objective, pricing = _check_arguments(
         sample, payout, objective, pricing, scope=scope
     )
+    # A free level of a step that holds an index of 0 may pay there.
+    check_left_out_unpaid(sample, payout.basis(np.zeros(1)).sum())
     kappa = None if budget is None else check_real("budget", budget, low=0.0)
     measure = sample.measure.as_probability()
     levels, problems = _solve_problems(

@@ -94,6 +94,7 @@ __all__ = [
     "Basis",
     "OutcomeSample",
     "SplitRecord",
+    "check_left_out_unpaid",
     "check_no_leakage",
     "holdout",
     "year_block_kfold",
@@ -634,6 +635,38 @@ def check_no_leakage(design: OutcomeSample, evaluation: OutcomeSample) -> None:
             f"{len(blocks)} blocks are in both samples, e.g. {list(blocks[:5])}: the "
             "events of a block (an ensemble's parent, or a catalogue year) belong "
             "on one side"
+        )
+
+
+def check_left_out_unpaid(sample: OutcomeSample, paid_at_zero: ArrayLike) -> None:
+    """Raise if the sample left events out and a payout pays at an index of 0.
+
+    :meth:`OutcomeSample.from_impact` leaves out the events with no loss and
+    an index of 0 at every unit. A payout that pays at an index of 0 would
+    pay on them, and the premium, the objective and the metrics would leave
+    those payouts out with no error.
+
+    Parameters
+    ----------
+    sample : OutcomeSample
+        The sample a payout is designed or evaluated on.
+    paid_at_zero : array_like of float
+        What the payout pays at an index of 0, per unit; any positive value
+        where it may pay, such as a free level.
+
+    Raises
+    ------
+    ParametricInputError
+        If the sample left events out and a value is above 0.
+    """
+    if sample.n_left_out and np.any(np.asarray(paid_at_zero, dtype=np.float64) > 0):
+        raise ParametricInputError(
+            f"the sample left out {sample.n_left_out} events with no loss and an "
+            "index of 0 at every unit, and this payout pays, or may pay, at an "
+            "index of 0, so it would pay on them while the premium, the objective "
+            "and the metrics leave those payouts out. Move the first threshold "
+            "above 0, or build the sample with the OutcomeSample constructor from "
+            "every event, which leaves none out"
         )
 
 
