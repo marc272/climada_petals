@@ -18,124 +18,64 @@ with CLIMADA. If not, see <https://www.gnu.org/licenses/>.
 
 Tests of the solver routes that the calibration's tests do not reach.
 
-The mean squared error is solved with cvxpy, an optional dependency. Where
-cvxpy is installed, ``test_calibrate.py`` solves it for real. The tests here
-replace cvxpy with :class:`_FakeCvxpy`, a stand-in that evaluates the
-module's cvxpy expressions in numpy at the zero cover and reports a status
-chosen by the test. They check the module's side of the route: the
-problem it builds, the solver it asks for, how it rescales the result and
-how it reports a failed solve. They say nothing about the optimum.
+The mean squared error's route is tested here in full: its result, its
+cutting planes against the exact formulation with the load's auxiliary
+variables, fixed amounts, its stated limits, failed solves, and the
+uniqueness test. ``test_calibrate.py`` checks it on the golden cases and in
+the scopes' property.
 """
 
 from __future__ import annotations
 
-import sys
 import unittest
-from types import ModuleType, SimpleNamespace
+from types import SimpleNamespace
 from typing import Any
 from unittest import mock
 
 import numpy as np
+import scipy
 import scipy.sparse as sp
+from scipy.optimize import Bounds, LinearConstraint, minimize
 
 from climada_petals.engine.parametric import (
     MSE,
+    Budget,
     CalibrationError,
     CalibrationLimitError,
+    CalibrationOptions,
     CatalogueYears,
     CostOfCapitalLoad,
     ExpectedUncovered,
+    Free,
     InfeasibleCalibrationError,
     PurePremium,
     StepPayout,
     UnboundedCalibrationError,
     WeightedCVaR,
+    calibrate,
 )
 from climada_petals.engine.parametric.solvers import (
-    CLARABEL_OPTIONS,
     DesignProblem,
+    QPLimits,
     Solution,
     SolverInfo,
     check_amounts,
+    check_limit,
     lp_method,
     solve_design,
     verify_solution,
+)
+from climada_petals.engine.parametric.test._synthetic import (
+    array_sample,
+    random_portfolio,
+    template,
 )
 
 PAYOUT = StepPayout.uniform(attachment=20.0, exhaustion=70.0, n_steps=2)
 INDEX = np.array([[30.0, 10.0], [60.0, 50.0], [25.0, 65.0]])
 LOSS = np.array([[4.0, 0.0], [10.0, 6.0], [1.0, 8.0]])
-
-
-class _FakeVariable(np.ndarray):
-    """A cvxpy ``Variable`` stand-in: zeros, with a ``value`` set by a solve."""
-
-    value: Any = None
-
-
-class _FakeProblem:
-    """A cvxpy ``Problem`` stand-in that evaluates its objective at zero."""
-
-    def __init__(self, fake: _FakeCvxpy, objective: Any, constraints: list) -> None:
-        self.fake = fake
-        self.objective = objective
-        self.constraints = constraints
-        self.status: str | None = None
-        self.value: float | None = None
-        self.solver_stats: Any = None
-
-    def solve(self, **options: Any) -> None:
-        """Record the options, then fail or set the status chosen by the test."""
-        self.fake.solve_options = options
-        if self.fake.error:
-            raise self.fake.SolverError("numerical trouble")
-        self.status = self.fake.status
-        self.value = float(self.objective)
-        self.solver_stats = SimpleNamespace(num_iters=7)
-        for var in self.fake.variables:
-            var.value = np.asarray(var).copy() if self.status == "optimal" else None
-        self.fake.problems.append(self)
-
-
-class _FakeCvxpy(ModuleType):
-    """The part of cvxpy that the mean squared error route uses."""
-
-    class SolverError(Exception):
-        """Raised by a solve when the test asks for an error."""
-
-    def __init__(self, *, status: str = "optimal", error: bool = False) -> None:
-        super().__init__("cvxpy")
-        self.__version__ = "0.0-fake"
-        self.status = status
-        self.error = error
-        self.variables: list[_FakeVariable] = []
-        self.problems: list[_FakeProblem] = []
-        self.solve_options: dict[str, Any] = {}
-
-    def Variable(self, size: int | None = None) -> _FakeVariable:
-        """Return zeros of the variable's shape."""
-        var = np.zeros(() if size is None else size).view(_FakeVariable)
-        self.variables.append(var)
-        return var
-
-    @staticmethod
-    def pos(expr: Any) -> Any:
-        """The positive part."""
-        return np.maximum(expr, 0.0)
-
-    @staticmethod
-    def square(expr: Any) -> Any:
-        """The square."""
-        return np.square(expr)
-
-    @staticmethod
-    def Minimize(expr: Any) -> Any:
-        """The objective itself."""
-        return expr
-
-    def Problem(self, objective: Any, constraints: list) -> _FakeProblem:
-        """A problem that evaluates its objective at the zero cover."""
-        return _FakeProblem(self, objective, constraints)
+LOAD = CostOfCapitalLoad(rate=0.3, q=0.9)
+MINIMIZE = "climada_petals.engine.parametric._qp.minimize"
 
 
 def _problem(
@@ -158,58 +98,300 @@ def _problem(
     )
 
 
-class TestQuadraticProgramRoute(unittest.TestCase):
-    """The mean squared error route, with cvxpy replaced by :class:`_FakeCvxpy`."""
+def _one_unit(bound: float | None = None) -> DesignProblem:
+    """The first unit of :func:`_problem` alone."""
+    years = CatalogueYears.from_labels([1, 2, 3], [0, 0, 3], n_years=10)
+    return DesignProblem(
+        problem_id="U0",
+        basis=sp.csr_matrix(PAYOUT.basis(INDEX[:, 0])),
+        loss=LOSS[:, 0],
+        constraints=[PAYOUT.amount_constraints(10.0)],
+        measure=years.measure([1, 2, 3], [0.1] * 3),
+        bound=bound,
+    )
 
-    def _solve(self, fake: _FakeCvxpy, pricing: Any, problem: DesignProblem) -> Any:
-        with mock.patch.dict(sys.modules, {"cvxpy": fake}):
-            return solve_design(problem, MSE(), pricing, method="highs")
 
-    def test_the_result_is_rescaled_to_loss_units(self) -> None:
-        for pricing, bound, limits, n_constraints, n_variables in (
-            (PurePremium(), None, (10.0, 8.0), 3, 1),
-            (PurePremium(), 0.5, (10.0, 8.0), 4, 1),
-            (PurePremium(), None, (None, None), 2, 1),
-            (CostOfCapitalLoad(rate=0.1, q=0.9), 0.5, (10.0, 8.0), 5, 2),
+def _exact_loaded(problem: DesignProblem, load: CostOfCapitalLoad) -> Any:
+    """Solve the loaded design with the load's auxiliary variables, no cuts.
+
+    The variables are the amounts, ``eta`` and one ``x_o`` per outcome:
+    ``x_o >= P_o - eta``, ``x, eta >= 0`` and
+    ``(1 - r) E[P] + r (eta + sum_o w_o x_o / (1 - q)) <= bound``.
+    """
+    group = problem.measure.grouping.toarray()
+    weights = np.asarray(problem.measure.weights)
+    outcome_basis = group @ problem.basis.toarray()
+    target = group @ problem.loss
+    n_amounts, n_outcomes = outcome_basis.shape[1], weights.size
+    rows, rhs = problem.rows
+    tail = np.hstack([outcome_basis, -np.ones((n_outcomes, 1)), -np.eye(n_outcomes)])
+    budget = np.concatenate(
+        [
+            (1.0 - load.rate) * weights @ outcome_basis,
+            [load.rate],
+            load.rate * weights / (1.0 - load.q),
+        ]
+    )
+    monotone = np.hstack([rows.toarray(), np.zeros((rhs.size, 1 + n_outcomes))])
+    constraints = LinearConstraint(
+        np.vstack([tail, budget, monotone]),
+        -np.inf,
+        np.concatenate([np.zeros(n_outcomes), [problem.bound], rhs]),
+    )
+
+    def value(variables: np.ndarray) -> tuple[float, np.ndarray]:
+        residual = target - outcome_basis @ variables[:n_amounts]
+        gradient = np.zeros_like(variables)
+        gradient[:n_amounts] = -2.0 * outcome_basis.T @ (weights * residual)
+        return float(weights @ residual**2), gradient
+
+    lower = np.concatenate([problem.lower, np.zeros(1 + n_outcomes)])
+    upper = np.concatenate([problem.upper, np.full(1 + n_outcomes, np.inf)])
+    return minimize(
+        value,
+        lower,
+        jac=True,
+        method="SLSQP",
+        bounds=Bounds(lower, upper),
+        constraints=[constraints],
+        options={"ftol": 1e-12, "maxiter": 1_000},
+    )
+
+
+class TestMeanSquaredErrorRoute(unittest.TestCase):
+    """The mean squared error with ``SLSQP``, and cutting planes under a load."""
+
+    def test_the_result_is_in_loss_units_and_matches_numpy(self) -> None:
+        for pricing, bound, rounds in (
+            (PurePremium(), None, 1),
+            (PurePremium(), 0.5, 1),
+            (LOAD, 0.5, 2),
+            (LOAD, None, 1),
         ):
-            problem = _problem(bound=bound, limits=limits)
-            zero_cover = MSE().evaluate(
-                problem.loss, np.zeros_like(problem.loss), problem.measure
+            problem = _problem(bound=bound)
+            solution = solve_design(problem, MSE(), pricing, method="highs")
+            paid = problem.basis @ solution.amounts
+            info = solution.info
+            with self.subTest(pricing=pricing, bound=bound):
+                self.assertEqual(
+                    (info.route, info.solver, info.method, info.status),
+                    ("qp", "scipy-slsqp", "slsqp", "0"),
+                )
+                self.assertEqual(
+                    (info.version, info.rounds), (scipy.__version__, rounds)
+                )
+                self.assertGreater(info.iterations or 0, 0)
+                value = MSE().evaluate(problem.loss, paid, problem.measure)
+                self.assertAlmostEqual(solution.objective_value, value, delta=1e-9)
+                check_amounts(problem, solution.amounts, 1e-9)
+                if bound is not None:
+                    premium = pricing.premium(paid, problem.measure)
+                    self.assertLessEqual(premium, bound * (1 + 1e-7))
+                    self.assertAlmostEqual(premium, bound, delta=1e-7)
+
+    def test_a_hand_worked_design(self) -> None:
+        # Year 0 pays t0 + t1 against a loss of 14, year 3 pays t0 against 1,
+        # each with weight 0.1. The fit t = (1, 13) is above the limit 10, so
+        # t1 = 10 and t0 = 2.5 splits the rest: MSE = 0.1 (1.5^2 + 1.5^2).
+        solution = solve_design(_one_unit(), MSE(), PurePremium(), method="highs")
+        np.testing.assert_allclose(solution.amounts, [2.5, 10.0], atol=1e-6)
+        self.assertAlmostEqual(solution.objective_value, 0.45, delta=1e-9)
+        # E[P] = 0.2 t0 + 0.1 t1 <= 0.6 binds. A level of t0 costs twice as
+        # much as one of t1 and fits less, so t0 = 0 and t1 = 6: the KKT
+        # multipliers are 16 for the budget and 1.4 for t0 >= 0.
+        bounded = solve_design(_one_unit(0.6), MSE(), PurePremium(), method="highs")
+        np.testing.assert_allclose(bounded.amounts, [0.0, 6.0], atol=1e-6)
+        self.assertAlmostEqual(
+            bounded.objective_value, 0.1 * (8.0**2 + 1.0), delta=1e-8
+        )
+
+    def test_the_cuts_reach_the_exact_loaded_design(self) -> None:
+        problems = [_problem(bound=bound) for bound in (0.2, 0.5, 1.0)]
+        problems += [_one_unit(bound) for bound in (0.4, 0.8)]
+        for problem in problems:
+            solution = solve_design(problem, MSE(), LOAD, method="highs")
+            exact = _exact_loaded(problem, LOAD)
+            with self.subTest(problem=problem.problem_id, bound=problem.bound):
+                self.assertTrue(exact.success, exact.message)
+                self.assertAlmostEqual(solution.objective_value, exact.fun, delta=1e-8)
+                self.assertGreaterEqual(solution.info.rounds or 0, 1)
+                if solution.unique:
+                    # One unit's two levels are unique; two units' are not.
+                    np.testing.assert_allclose(
+                        solution.amounts, exact.x[:2], atol=1e-6 * problem.scale
+                    )
+
+    def test_fixed_amounts_are_constants(self) -> None:
+        # The fixed levels alone cost 0.7 * 1.5 + 0.3 * 10 = 4.05 under the load.
+        fixed = StepPayout.uniform(20.0, 70.0, 2, levels=[Free(), 5.0])
+        problem = _problem(bound=5.0, payout=fixed)
+        solution = solve_design(
+            problem, MSE(), LOAD, method="highs", limits=QPLimits(max_slsqp_amounts=2)
+        )
+        self.assertEqual(solution.amounts[[1, 3]].tolist(), [5.0, 5.0])
+        # Every amount fixed: nothing to solve for.
+        both = StepPayout.uniform(20.0, 70.0, 2, levels=[3.0, 5.0])
+        solution = solve_design(_problem(payout=both), MSE(), LOAD, method="highs")
+        self.assertEqual(solution.amounts.tolist(), [3.0, 5.0, 3.0, 5.0])
+        self.assertEqual((solution.info.rounds, solution.info.iterations), (0, 0))
+        self.assertTrue(solution.unique)
+
+    def test_the_stated_limits_raise(self) -> None:
+        cases = [
+            (
+                {"limits": QPLimits(max_slsqp_amounts=3)},
+                PurePremium(),
+                "max_slsqp_amounts",
+            ),
+            ({"limits": QPLimits(max_cut_rounds=1)}, LOAD, "max_cut_rounds"),
+            ({"time_limit": 1e-9}, LOAD, "time_limit"),
+        ]
+        for options, pricing, name in cases:
+            with (
+                self.subTest(name=name),
+                self.assertRaisesRegex(CalibrationLimitError, f"{name}=") as caught,
+            ):
+                solve_design(
+                    _problem(bound=0.2), MSE(), pricing, method="highs", **options
+                )
+            self.assertEqual(caught.exception.status, name)
+        # Two rounds are enough there; fixed amounts don't count.
+        solution = solve_design(
+            _problem(bound=0.2),
+            MSE(),
+            LOAD,
+            method="highs",
+            limits=QPLimits(max_slsqp_amounts=4, max_cut_rounds=2),
+        )
+        self.assertEqual(solution.info.rounds, 2)
+
+    def test_failed_solves_raise_typed_errors(self) -> None:
+        cases = {
+            9: (CalibrationLimitError, "iteration limit"),
+            8: (CalibrationError, "no optimal solution"),
+        }
+        for status, (kind, match) in cases.items():
+            failed = SimpleNamespace(
+                success=False, status=status, message="from SLSQP", x=np.zeros(4)
             )
-            fake = _FakeCvxpy()
-            solution = self._solve(fake, pricing, problem)
-            with self.subTest(pricing=pricing, bound=bound, limits=limits):
-                # At the zero cover the scaled objective is 1, so the value
-                # in loss units is the zero cover's mean squared error.
-                self.assertAlmostEqual(solution.objective_value, zero_cover)
-                np.testing.assert_array_equal(solution.amounts, np.zeros(4))
-                self.assertEqual(
-                    (solution.info.route, solution.info.solver, solution.info.method),
-                    ("qp", "cvxpy-CLARABEL", None),
+            with (
+                self.subTest(status=status),
+                mock.patch(MINIMIZE, return_value=failed),
+                self.assertRaisesRegex(kind, match) as caught,
+            ):
+                solve_design(_problem(bound=0.5), MSE(), PurePremium(), method="highs")
+            self.assertIs(type(caught.exception), kind)
+            self.assertEqual(caught.exception.status, str(status))
+            self.assertEqual(caught.exception.solver_message, "from SLSQP")
+        # A fixed level whose premium is above a zero budget: HiGHS confirms.
+        fixed = StepPayout.uniform(20.0, 70.0, 2, levels=[Free(), 5.0])
+        for pricing in (PurePremium(), LOAD):
+            with (
+                self.subTest(pricing=pricing),
+                self.assertRaisesRegex(InfeasibleCalibrationError, "infeasible"),
+            ):
+                solve_design(
+                    _problem(bound=0.0, payout=fixed), MSE(), pricing, method="highs"
                 )
-                self.assertEqual(solution.info.version, "0.0-fake")
-                self.assertEqual(solution.info.status, "optimal")
-                self.assertEqual(solution.info.iterations, 7)
-                self.assertEqual(
-                    fake.solve_options, {"solver": "CLARABEL", **CLARABEL_OPTIONS}
+
+    def test_uniqueness_from_the_hessian(self) -> None:
+        never = StepPayout.uniform(attachment=100.0, exhaustion=120.0, n_steps=2)
+        cases = {
+            # Two outcomes with a payout fit two levels of one unit.
+            "one unit": (_one_unit(0.5), True),
+            # Three identified levels, two outcomes: a direction is free.
+            "two units": (_problem(bound=0.5), False),
+            # No amount is identified.
+            "no payout": (_problem(bound=0.5, payout=never), True),
+        }
+        for name, (problem, unique) in cases.items():
+            with self.subTest(name=name):
+                solution = solve_design(problem, MSE(), PurePremium(), method="highs")
+                self.assertIs(solution.unique, unique)
+        lp = solve_design(
+            _one_unit(0.5), ExpectedUncovered(), PurePremium(), method="highs"
+        )
+        self.assertIsNone(lp.unique)
+
+
+class TestMeanSquaredErrorDesigns(unittest.TestCase):
+    """The mean squared error through :func:`calibrate`."""
+
+    def test_a_design_pays_nothing_below_the_attachment(self) -> None:
+        values, loss = [[30.0], [60.0], [5.0]], [[4.0], [10.0], [0.0]]
+        sample = array_sample(values, loss, [0, 1, 2], 10)[0]
+        result = calibrate(
+            template(sample, StepPayout.uniform(20.0, 70.0, 2)),
+            sample,
+            MSE(),
+            scope="individual",
+            budget=Budget(ratio=5.0),
+        )
+        payout = result.cover.payout["U0"]
+        assert isinstance(payout, StepPayout)
+        np.testing.assert_allclose(payout.amounts(), [4.0, 10.0], atol=1e-6)
+        self.assertAlmostEqual(result.objective_value, 0.0, places=9)
+        self.assertEqual(result.problems[0].solver.route, "qp")
+
+    def test_the_route_needs_no_cvxpy(self) -> None:
+        sample, _ = random_portfolio(0)
+        with mock.patch.dict("sys.modules", {"cvxpy": None}):
+            result = calibrate(
+                template(sample, PAYOUT),
+                sample,
+                MSE(),
+                scope="joint",
+                pricing=LOAD,
+                budget=Budget(ratio=0.5),
+                options=CalibrationOptions(time_limit=60.0),
+            )
+        self.assertEqual(result.problems[0].solver.solver, "scipy-slsqp")
+
+    def test_the_record(self) -> None:
+        sample, _ = random_portfolio(1)
+        common = {"budget": Budget(ratio=0.5), "pricing": LOAD}
+        result = calibrate(
+            template(sample, PAYOUT), sample, MSE(), scope="individual", **common
+        )
+        summary = result.summary()
+        self.assertEqual(
+            summary["unique"].tolist(), [p.unique for p in result.problems]
+        )
+        self.assertEqual(result.unique, all(summary["unique"]))
+        self.assertTrue((summary["rounds"] >= 1).all())
+        self.assertEqual(set(summary["method"]), {"slsqp"})
+        linear = calibrate(
+            template(sample, PAYOUT),
+            sample,
+            ExpectedUncovered(),
+            scope="joint",
+            **common,
+        )
+        self.assertIsNone(linear.unique)
+        self.assertIsNone(linear.summary()["rounds"].iloc[0])
+
+    def test_the_options_reach_the_route(self) -> None:
+        sample, _ = random_portfolio(2)
+        cover = template(sample, PAYOUT)
+        cases = {
+            "max_slsqp_amounts": CalibrationOptions(max_slsqp_amounts=4),
+            "max_cut_rounds": CalibrationOptions(max_cut_rounds=1),
+            "time_limit": CalibrationOptions(time_limit=1e-9),
+        }
+        for name, options in cases.items():
+            with (
+                self.subTest(name=name),
+                self.assertRaisesRegex(CalibrationLimitError, name),
+            ):
+                calibrate(
+                    cover,
+                    sample,
+                    MSE(),
+                    scope="joint",
+                    pricing=LOAD,
+                    budget=Budget(ratio=0.3),
+                    options=options,
                 )
-                self.assertEqual(len(fake.variables), n_variables)
-                # Bounds, finite upper bounds, monotonicity, the budget and the
-                # load's level, each where it applies.
-                (built,) = fake.problems
-                self.assertEqual(len(built.constraints), n_constraints)
-                self.assertTrue(all(np.all(c) for c in built.constraints))
-
-    def test_a_solver_error_raises(self) -> None:
-        with self.assertRaisesRegex(CalibrationError, "CLARABEL failed"):
-            self._solve(_FakeCvxpy(error=True), PurePremium(), _problem())
-
-    def test_a_status_other_than_optimal_raises(self) -> None:
-        with self.assertRaisesRegex(CalibrationError, "infeasible") as caught:
-            self._solve(_FakeCvxpy(status="infeasible"), PurePremium(), _problem())
-        self.assertEqual(caught.exception.status, "infeasible")
-        self.assertEqual(caught.exception.problem_id, "joint")
-        self.assertEqual(caught.exception.solver_message, "infeasible")
 
 
 class TestLinearProgramRoute(unittest.TestCase):
@@ -313,6 +495,14 @@ class TestChecks(unittest.TestCase):
                 self.assertRaisesRegex(CalibrationError, "break their bounds or rows"),
             ):
                 check_amounts(problem, np.array(amounts), 1e-7)
+
+    def test_payouts_above_their_limit_raise(self) -> None:
+        problem = _problem()
+        paid = np.array([[4.0, 0.0], [10.0, 8.0 + 1e-9], [1.0, 8.0]])
+        check_limit(problem, paid, [10.0, 8.0], 1e-7)
+        check_limit(problem, paid * 2.0, [None, None], 1e-7)
+        with self.assertRaisesRegex(CalibrationError, "above its limit 8"):
+            check_limit(problem, paid + 0.01, [None, 8.0], 1e-7)
 
     def test_the_objective_and_the_budget_are_recomputed(self) -> None:
         problem = _problem(bound=0.5)

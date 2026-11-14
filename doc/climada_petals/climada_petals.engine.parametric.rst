@@ -1,6 +1,22 @@
 climada\_petals\.engine\.parametric package
 ===========================================
 
+climada\_petals\.engine\.parametric\.\_problem module
+-----------------------------------------------------
+
+.. automodule:: climada_petals.engine.parametric._problem
+    :members:
+    :undoc-members:
+    :show-inheritance:
+
+climada\_petals\.engine\.parametric\.\_qp module
+------------------------------------------------
+
+.. automodule:: climada_petals.engine.parametric._qp
+    :members:
+    :undoc-members:
+    :show-inheritance:
+
 climada\_petals\.engine\.parametric\.annual module
 --------------------------------------------------
 

@@ -35,7 +35,7 @@ uncovered loss:
   the uncovered loss, not a CVaR with weights on the outcomes.
 * :class:`MSE`: ``sum_o w_o (L_o - P_o)^2``, the signed residual per
   outcome, so over-payment counts like under-payment. A quadratic program
-  (QP): this version solves it with the optional dependency cvxpy.
+  (QP), solved with scipy's ``SLSQP``.
 
 On the event basis ``1 - beta`` is a frequency per year, and the CVaR is
 the mean of the worst ``1 - beta`` of frequency, the missing mass counting
@@ -45,7 +45,7 @@ needs no probability: in the Rockafellar-Uryasev form
 the bound ``zeta >= 0`` gives this CVaR for any weights, because ``U`` is
 never negative.
 
-The LPs are solved with scipy's HiGHS
+The LPs are solved with scipy's HiGHS, the QP with scipy's ``SLSQP``
 (:mod:`~climada_petals.engine.parametric.solvers`). Each class also
 evaluates its objective for given losses and payouts with numpy: the
 calibration recomputes every solution's objective that way, and checks it
@@ -91,11 +91,10 @@ class MSE:
 
     On the annual basis the residual of a year is the year's loss minus its
     payout, summed over its events before squaring: the owner's net
-    position per year. A QP: this version solves it with cvxpy, an optional
-    dependency, and
-    :func:`~climada_petals.engine.parametric.calibrate.calibrate` raises
-    :class:`~climada_petals.engine.parametric.errors.MissingDependencyError`
-    without it.
+    position per year. A QP, which
+    :func:`~climada_petals.engine.parametric.calibrate.calibrate` solves
+    with scipy's ``SLSQP`` on the amounts, with cutting planes under a
+    cost-of-capital load, within stated limits.
     """
 
     name: ClassVar[str] = "mse"
