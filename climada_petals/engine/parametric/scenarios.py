@@ -405,7 +405,7 @@ class ScenarioSet:
         -------
         OutcomeSample
             With ``scenario`` the label. A mixture is a whole sample of the
-            members' events, numbered ``-1, -2, ...``
+            members' events, numbered and labelled by member
             (:mod:`~climada_petals.engine.parametric._mixture`).
 
         Raises
