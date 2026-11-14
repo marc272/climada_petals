@@ -62,10 +62,12 @@ A set scaled by                         The event basis, or year sets
                                         changes frequencies only, so they are
                                         no longer ``1 / N``, and catalogue
                                         years raise ``YearRouteError``
-Future tropical cyclones of the Data    Year sets or the event basis: the
-API, ``random_walk`` (properties        frequencies are not uniform, and
-``climate_scenario`` and ``ref_year``)  differ between the members of one
-                                        parent
+Future tropical cyclones of the Data    Year sets on the whole file, or the
+API, ``random_walk`` (properties        event basis: the frequencies are not
+``climate_scenario`` and ``ref_year``)  uniform, and differ between the
+                                        members of one parent. Catalogue
+                                        years only on events of frequency
+                                        ``1 / N``, as for the present
 STORM per climate model                 Catalogue years from the event names,
                                         as for the present
 Any other hazard set                    The route its present-day set takes
@@ -112,9 +114,14 @@ member and returns a training and a test set with the same labels. A
 mixture's years on year sets are its members' years; ``holdout`` of the
 mixture itself would sample each side's years from the pooled frequencies
 of all members, so that one year mixes the events of every member.
+
 :func:`evaluate_scenarios` checks an out-of-sample evaluation of a design
 for leakage as :func:`~climada_petals.engine.parametric.evaluate.evaluate`
-does, on every member that was cut from another sample.
+does: against every sample, or member of a mixture, that was cut from
+another; and a design on a mixture against the mixture of its scenario's
+other sides. The members of a mixture are different hazard sets, whose
+event ids and blocks say nothing about each other, so the mixture keeps
+them apart (:mod:`~climada_petals.engine.parametric._mixture`).
 
 A set scaled by ``apply_climate_scenario_knu`` holds its baseline's events:
 a design calibrated on the baseline has seen every footprint of it, and its
@@ -141,7 +148,7 @@ from ._mixture import (
     scenario_members,
     where,
 )
-from .calibrate import CalibrationOptions, CalibrationResult, calibrate
+from .calibrate import CalibrationOptions, CalibrationResult, DesignSample, calibrate
 from .constraints import Budget
 from .cover import IndexDefinition, ParametricCover
 from .errors import ParametricError, ParametricInputError
@@ -690,6 +697,31 @@ def _splits(split: object, labels: tuple[str, ...]) -> dict[str, Any]:
     return {label: split[label] for label in labels}
 
 
+def _check_mixture_leakage(
+    design: DesignSample, scenarios: ScenarioSet, label: str
+) -> None:
+    """Check a mixture's cut members against a design (module docstring).
+
+    Every cut member is checked as ``evaluate`` checks a cut sample; a
+    design on this scenario is also checked against the mixture, whose
+    events and blocks carry their member.
+
+    Raises
+    ------
+    LeakageError
+        If a member, or the mixture, shares an event or a block with the
+        design sample.
+    """
+    group = scenarios.members[label]
+    cut = [member for member in group if member.split is not None]
+    if len(group) == 1 or not cut:
+        return
+    for member in cut:
+        check_no_leakage(design, member)
+    if design.scenario == label:
+        check_no_leakage(design, scenarios.sample(label))
+
+
 def evaluate_scenarios(
     entry: ParametricCover | CalibrationResult,
     scenarios: ScenarioSet,
@@ -753,16 +785,9 @@ def evaluate_scenarios(
     design = entry.design_sample if isinstance(entry, CalibrationResult) else None
     tables = []
     for label in checked.labels:
-        group = checked.members[label]
         try:
-            if (
-                splits[label] == "out_of_sample"
-                and design is not None
-                and len(group) > 1
-            ):
-                for member in group:
-                    if member.split is not None:
-                        check_no_leakage(design, member)
+            if splits[label] == "out_of_sample" and design is not None:
+                _check_mixture_leakage(design, checked, label)
             table = evaluate(
                 entry,
                 checked.sample(label),
@@ -892,7 +917,7 @@ def designs_table(designs: Mapping[str, CalibrationResult]) -> pd.DataFrame:
     ParametricInputError
         If ``designs`` is not a non-empty mapping of labels to designs.
     """
-    items = labelled_items(designs)
+    items = labelled_items(designs, "designs")
     frames = []
     for label, result in items:
         if not isinstance(result, CalibrationResult):

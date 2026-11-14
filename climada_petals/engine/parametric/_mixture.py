@@ -49,17 +49,22 @@ So an expectation is the mean of the members' expectations, and a VaR or a
 CVaR is that of the mixed distribution: on the annual basis a year of the
 mixture is a year of one member.
 
-* **Events** are numbered ``-1, -2, ...`` in the order of the members, so
-  that they never coincide with a hazard set's event ids, which are
-  positive: a leakage check of a design on a mixture against a sample of a
-  hazard set then rests on the blocks, below. An event's name is
-  ``"<member>:<name>"``, with the member's position and the event's name in
-  the member (its id where the member has no names).
-* **Blocks** are the members' own: the given labels (an ensemble's parent
-  storm, say), else the year on catalogue years and the event id on the
-  other routes. A label in two members is one block, so the same storm in
-  two windows of a pathway, or an event of a frequency-scaled set and of its
-  baseline, stay on one side of a split.
+The members are different hazard sets. As
+:func:`~climada_petals.engine.parametric.sample.check_no_leakage` treats
+two such sets, their event ids and blocks say nothing about each other, so
+a mixture keeps them apart:
+
+* **Events** are numbered ``-(m |e| + i + 1)`` for the event ``e`` of
+  member ``i`` (from 0): negative, so that they don't coincide with the
+  positive ids that CLIMADA's hazard sets use, and the same for the same
+  event of the same member in two mixtures of ``m`` members, such as the
+  training and the test set of
+  :meth:`~climada_petals.engine.parametric.scenarios.ScenarioSet.holdout`.
+  An event's name is ``"<i>:<name>"``, with the event's name in its member
+  (its id where the member has no names).
+* **Blocks** are the members' own, labelled ``"<i>:<block>"``: the given
+  labels (an ensemble's parent storm, say), else the year on catalogue
+  years and the event id on the other routes.
 * **Draws**: the members have the same number of draws, and the rows are
   ordered by draw, then event, as in any sample.
 
@@ -137,18 +142,18 @@ def as_sequence(value: object, what: str) -> tuple[Any, ...]:
     return tuple(value)
 
 
-def labelled_items(members: object) -> list[tuple[str, Any]]:
+def labelled_items(members: object, what: str = "members") -> list[tuple[str, Any]]:
     """Return the items of a non-empty mapping with non-empty string labels.
 
     Raises
     ------
     ParametricInputError
-        If ``members`` is not such a mapping.
+        If ``members`` (named ``what`` in the message) is not such a mapping.
     """
     if not isinstance(members, Mapping) or not members:
         raise ParametricInputError(
-            "members must be a non-empty mapping of scenario labels to their "
-            f"samples, got {type(members).__name__}"
+            f"{what} must be a non-empty mapping with scenario labels as keys, "
+            f"got {type(members).__name__}"
         )
     bad = [label for label in members if not isinstance(label, str) or not label]
     if bad:
@@ -504,15 +509,26 @@ class MixtureCatalogue(CatalogueYears):
 
 
 def _blocks(members: Sequence[OutcomeSample]) -> NDArray[Any]:
-    """Return the members' blocks, one per event of the mixture, in order.
+    """Return the members' blocks as ``"<i>:<block>"``, one per event, in order."""
+    return np.array(
+        [
+            f"{position}:{block}"
+            for position, member in enumerate(members)
+            for block in np.asarray(member.block).tolist()
+        ],
+        dtype=object,
+    )
 
-    Labels keep their type: blocks of one type are joined as they are, and
-    blocks of several types as objects, so that ``1`` and ``"1"`` stay apart.
-    """
-    blocks = [np.asarray(member.block) for member in members]
-    if len({block.dtype.kind for block in blocks}) == 1:
-        return np.concatenate(blocks)
-    return np.concatenate([block.astype(object) for block in blocks])
+
+def _event_ids(members: Sequence[OutcomeSample]) -> NDArray[np.int64]:
+    """Return the mixture's event ids, ``-(m |e| + i + 1)`` (module docstring)."""
+    count = len(members)
+    return np.concatenate(
+        [
+            -(count * np.abs(member.event_id) + position + 1)
+            for position, member in enumerate(members)
+        ]
+    ).astype(np.int64)
 
 
 def _index(
@@ -663,8 +679,7 @@ def mixture_sample(label: str, members: Sequence[OutcomeSample]) -> OutcomeSampl
         docstring), with the sum of their ``n_left_out``.
     """
     first = members[0]
-    sizes = [member.n_events for member in members]
-    event_id = -np.arange(1, sum(sizes) + 1, dtype=np.int64)
+    event_id = _event_ids(members)
     block = _blocks(members)
     basis: EventBasis | MixtureYears | MixtureCatalogue
     if first.kind == EVENT:
