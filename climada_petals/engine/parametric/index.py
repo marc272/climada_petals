@@ -89,7 +89,8 @@ from .units import InsuredUnits
 __all__ = ["HAZARD", "TABLE", "ParametricIndex"]
 
 HAZARD: Final[str] = "hazard"
-"""The ``kind`` of an :class:`IndexDefinition` built by ``from_hazard``."""
+"""The ``kind`` of an :class:`~climada_petals.engine.parametric.cover.IndexDefinition` built
+by ``from_hazard``."""
 
 TABLE: Final[str] = "table"
 """The ``kind`` the docs suggest for a user's table (``from_table``)."""
@@ -286,8 +287,9 @@ class ParametricIndex:
         """Index = a statistic of the hazard's intensity over each unit's centroids.
 
         A unit's centroids are the distinct centroids its points are
-        assigned to (:meth:`InsuredUnits.centroids`). The hazard need not
-        be the one behind the loss: match another with :meth:`matched_to`.
+        assigned to (:meth:`~climada_petals.engine.parametric.units.InsuredUnits.centroids`). The
+        hazard need not be the one behind the loss: match another with
+        :meth:`matched_to`.
 
         Parameters
         ----------
@@ -332,7 +334,7 @@ class ParametricIndex:
             If ``index_stat``, ``weight`` or ``tail`` is invalid.
         UnitMappingError
             If a point of a unit has no centroid in the hazard
-            (:meth:`InsuredUnits.centroids`).
+            (:meth:`~climada_petals.engine.parametric.units.InsuredUnits.centroids`).
         """
         if not isinstance(hazard.units, str) or not hazard.units:
             raise ParametricInputError(

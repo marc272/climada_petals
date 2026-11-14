@@ -154,21 +154,18 @@ class PayoutFunction(abc.ABC):
     :meth:`to_dict` and :meth:`from_dict`. A user family that wants the
     calibration's exact solvers implements :class:`LinearInAmounts`.
     :func:`register_payout` lets a cover document name it.
-
-    Attributes
-    ----------
-    kind : str
-        The family's name in a document, e.g. ``"step"``. Class attribute.
-    index_names : tuple of str
-        The index components the payout reads: one, ``("index",)``, in this
-        version. Class attribute.
-    tail : {"upper", "lower"}
-        Which side of the index is severe (module docstring).
     """
 
     kind: ClassVar[str] = ""
+    """The family's name in a document, e.g. ``"step"``. Class attribute."""
+
     index_names: ClassVar[tuple[str, ...]] = ("index",)
+    """The index components the payout reads, ``("index",)`` in this
+    version. Class attribute."""
+
     tail: str
+    """Which side of the index is severe, ``"upper"`` or ``"lower"`` (module
+    docstring)."""
 
     @abc.abstractmethod
     def evaluate(self, index: ArrayLike) -> NDArray[np.float64]:
@@ -224,7 +221,13 @@ class PayoutFunction(abc.ABC):
         return not self.free_parameters()
 
     def check_resolved(self) -> None:
-        """Raise :class:`UnresolvedParameterError` if a parameter is free."""
+        """Raise if a parameter is free.
+
+        Raises
+        ------
+        UnresolvedParameterError
+            If a parameter is free.
+        """
         free = self.free_parameters()
         if free:
             raise UnresolvedParameterError(
@@ -338,8 +341,12 @@ class PayoutFunction(abc.ABC):
         """Return the severity of index values: ``x`` (upper) or ``-x`` (lower).
 
         The values are converted to float, so an integer index is not
-        truncated. Raises :class:`ParametricInputError` if a value is not
-        numeric or not finite.
+        truncated.
+
+        Raises
+        ------
+        ParametricInputError
+            If a value is not numeric or not finite.
         """
         values = _index_values(index)
         return -values if self.tail == "lower" else values
@@ -388,7 +395,10 @@ class LinearInAmounts(PayoutFunction):
     def amounts(self) -> NDArray[np.float64]:
         """Return the amounts, shape ``(n_amounts,)``, in :meth:`amount_names` order.
 
-        Raises :class:`UnresolvedParameterError` if an amount is free.
+        Raises
+        ------
+        UnresolvedParameterError
+            If an amount is free.
         """
         parameters = self.parameters()
         names = self.amount_names()

@@ -46,7 +46,7 @@ __all__ = ["ImpactLosses", "impact_losses", "take_events"]
 class ImpactLosses(NamedTuple):
     """The kept events of one or several impacts, as a sample takes them.
 
-    Attributes
+    Parameters
     ----------
     index : ParametricIndex
         The index of the kept events, in the index's order.

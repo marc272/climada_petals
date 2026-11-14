@@ -613,7 +613,8 @@ def setup_text(table: pd.DataFrame | pd.Series) -> str:
     Parameters
     ----------
     table : pandas.DataFrame or pandas.Series
-        Rows of :func:`evaluate` or :func:`compare`, or one row.
+        Rows of :func:`~climada_petals.engine.parametric.evaluate.evaluate` or
+        :func:`~climada_petals.engine.parametric.evaluate.compare`, or one row.
 
     Returns
     -------

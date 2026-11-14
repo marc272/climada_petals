@@ -62,7 +62,7 @@ MIN_SCALE_LOSS: Final[float] = 1e-6
 class SolverInfo:
     """How a design problem was solved.
 
-    Attributes
+    Parameters
     ----------
     route : {"lp", "qp"}
         One linear program, or the quadratic program of the mean squared
@@ -104,7 +104,7 @@ class SolverInfo:
 class DesignProblem:
     """The data of one design problem, in loss units.
 
-    Attributes
+    Parameters
     ----------
     problem_id : str
         A unit id (individual scope) or ``"joint"``.
@@ -130,7 +130,7 @@ class DesignProblem:
 
     @property
     def scale(self) -> float:
-        """Loss scale: the largest loss in one row, or 1 if it is tiny."""
+        """The loss scale, the largest loss in one row, or 1 if it is tiny."""
         largest = float(self.loss.max(initial=0.0))
         return largest if largest > MIN_SCALE_LOSS else 1.0
 
@@ -174,7 +174,7 @@ class DesignProblem:
 class Solution:
     """The solution of one design problem, in loss units.
 
-    Attributes
+    Parameters
     ----------
     amounts : numpy.ndarray
         The amounts as the solver returned them, shape ``(n_amounts,)``,
@@ -227,14 +227,14 @@ class Scaled:
 
     @property
     def identified(self) -> NDArray[np.bool_]:
-        """Which amounts are identified: not fixed, and reached by a row with a weight."""
+        """The identified amounts, those not fixed and reached by a row with a weight."""
         weighted = (self.event_weight > 0.0).astype(np.float64)
         reached = np.asarray(abs(self.basis).T @ weighted).reshape(-1) > 0.0
         return (self.lower < self.upper) & reached
 
     @property
     def budget_unit(self) -> float:
-        """Divisor of the budget row: ``E[L]``, or 1 if it is 0."""
+        """The divisor of the budget row, ``E[L]``, or 1 if it is 0."""
         expected = self.expected_loss
         return expected if expected > 0.0 else 1.0
 
@@ -255,7 +255,7 @@ def objective_norm(objective: Objective, arr: Scaled, measure: OutcomeMeasure) -
 class CoverProblem:
     """The solution of one design problem.
 
-    Attributes
+    Parameters
     ----------
     problem_id : str
         The unit id as text (individual scope), or ``"joint"``.
@@ -325,7 +325,7 @@ class DesignSample:
     :func:`~climada_petals.engine.parametric.sample.check_out_of_sample` to
     compare an evaluation sample with it.
 
-    Attributes
+    Parameters
     ----------
     basis : {"event", "annual"}
         What an outcome is.

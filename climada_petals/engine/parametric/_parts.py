@@ -134,7 +134,7 @@ SPLITS: Final[tuple[str, ...]] = ("holdout", "year_block_kfold", "select")
 class SplitRecord:
     """How a sample was cut from another.
 
-    Attributes
+    Parameters
     ----------
     method : {"holdout", "year_block_kfold", "select"}
         The function or method that made it.
