@@ -21,8 +21,9 @@ Insured units: the exposure points that share one payout function.
 A unit is what gets one payout function of a cover: one exposure point
 (:meth:`InsuredUnits.points`), a group of points
 (:meth:`InsuredUnits.from_column`, by a column of ``Exposures.gdf`` such as
-``region_id``, or :meth:`InsuredUnits.from_geometries`, by polygons), or the
-whole exposure set (:meth:`InsuredUnits.whole`). LitPop exposures hold
+``region_id``; :meth:`InsuredUnits.from_geometries`, by polygons; or
+:meth:`InsuredUnits.from_subareas`, by the subareas of ``cat_bonds``), or
+the whole exposure set (:meth:`InsuredUnits.whole`). LitPop exposures hold
 thousands of points, so a unit per point is rarely the contract anyone
 wants.
 
@@ -67,13 +68,17 @@ _COORD_ATOL: Final[float] = 1e-9
 
 _POLYGONS: Final[frozenset[str]] = frozenset({"Polygon", "MultiPolygon"})
 
+_SUBAREA_ID: Final[str] = "subarea_letter"
+"""The column of ``cat_bonds``' ``Subareas.subareas_gdf`` that labels a subarea."""
+
 
 @dataclass(frozen=True, eq=False)
 class InsuredUnits:
     """Insured units: a grouping of exposure points (module docstring).
 
-    Use :meth:`points`, :meth:`from_column`, :meth:`from_geometries` or
-    :meth:`whole`; the constructor takes the membership directly.
+    Use :meth:`points`, :meth:`from_column`, :meth:`from_geometries`,
+    :meth:`from_subareas` or :meth:`whole`; the constructor takes the
+    membership directly.
 
     Parameters
     ----------
@@ -299,6 +304,78 @@ class InsuredUnits:
             shape=(n_points, len(unit_id)),
         )
         return cls(exposures, membership, unit_id)
+
+    @classmethod
+    def from_subareas(cls, subareas: Any, exposures: Any = None) -> InsuredUnits:
+        """One unit per subarea of ``cat_bonds``: the exposure points it holds.
+
+        A ``Subareas`` object of
+        :mod:`climada_petals.engine.cat_bonds.subareas` holds polygons
+        (``subareas_gdf``, from ``Subareas.from_resolution`` or
+        ``Subareas.from_geodataframe``) and no column that maps the points
+        to them, so the points are joined to the polygons as in
+        :meth:`from_geometries`: a point on a polygon's boundary is in it,
+        and a point on the border of two subareas is in both, and raises.
+        Each subarea's ``subarea_letter`` is its unit id, used as a label
+        only: past 26 subareas ``cat_bonds`` labels them with the characters
+        after ``Z`` (``[`` for the 27th), which stay unique.
+
+        The subareas must cover every point of positive value, as
+        ``Subareas`` requires of its polygons, so a point of positive value
+        in no subarea raises. ``Subareas.from_geodataframe`` doesn't check
+        it. Points of value 0 in no subarea are left out and logged, as in
+        :meth:`from_geometries`; use that method directly to leave out
+        points of positive value too.
+
+        Parameters
+        ----------
+        subareas : climada_petals.engine.cat_bonds.subareas.Subareas
+            The subareas. Only ``subareas_gdf`` and, by default,
+            ``exposure`` are read.
+        exposures : climada.entity.Exposures, optional
+            The exposure points. Default: ``subareas.exposure``.
+
+        Returns
+        -------
+        InsuredUnits
+            The units in the order of the rows of ``subareas_gdf``.
+
+        Raises
+        ------
+        UnitMappingError
+            If a point of positive value is in no subarea, or as for
+            :meth:`from_geometries` with ``id_column="subarea_letter"``.
+        ParametricInputError
+            If ``subareas`` has no ``subareas_gdf`` or ``exposure``.
+
+        Examples
+        --------
+        With the hazard, the impact functions and the exposures of the
+        subareas (the hazard's ``units`` set)::
+
+            subareas = Subareas.from_resolution(hazard, impfset, exposures, 0.5)
+            units = InsuredUnits.from_subareas(subareas)
+            index = ParametricIndex.from_hazard(hazard, units, index_stat="mean")
+            impact = ImpactCalc(exposures, impfset, hazard).impact(save_mat=True)
+        """
+        if not (hasattr(subareas, "subareas_gdf") and hasattr(subareas, "exposure")):
+            raise ParametricInputError(
+                "subareas must be a Subareas of climada_petals.engine.cat_bonds, "
+                f"with subareas_gdf and exposure; got {type(subareas).__name__}"
+            )
+        units = cls.from_geometries(
+            subareas.exposure if exposures is None else exposures,
+            subareas.subareas_gdf,
+            id_column=_SUBAREA_ID,
+        )
+        value = units.exposures.gdf["value"].to_numpy(dtype=np.float64)
+        _refuse(
+            (units.point_unit < 0) & (value > 0),
+            units.exposures,
+            "of positive value are in no subarea; the subareas must cover the "
+            "exposures",
+        )
+        return units
 
     @classmethod
     def whole(cls, exposures: Any, *, unit_id: str | int = "total") -> InsuredUnits:
