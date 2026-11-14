@@ -346,6 +346,45 @@ class TestRoutes(unittest.TestCase):
                 self.assertGreater(cover.premium, 0.0)
                 self.assertEqual(table["basis"].iloc[-1], sample.kind)
 
+    def test_loss_free_events_below_the_attachment_change_nothing(self) -> None:
+        rng = np.random.default_rng(6)
+        values = rng.uniform(25.0, 80.0, size=(20, 2))
+        loss = (values - 25.0) ** 2
+        years = np.sort(rng.integers(0, 40, size=20))
+        # Ten events below the attachment, kept, and five with an index of 0,
+        # left out; none has a loss.
+        quiet = np.vstack([np.full((10, 2), 5.0), np.zeros((5, 2))])
+        more = (
+            np.vstack([values, quiet]),
+            np.vstack([loss, np.zeros((15, 2))]),
+            np.r_[years, rng.integers(0, 40, size=15)],
+        )
+        cases = itertools.product(("annual", "event"), ("individual", "portfolio"))
+        for basis, scope in cases:
+            samples = [
+                array_sample(*arrays, 40, basis=basis)[0]
+                for arrays in ((values, loss, years), more)
+            ]
+            covers = [
+                calibrate(
+                    sample,
+                    payout=PAYOUT,
+                    objective=WeightedCVaR(alpha=0.9, beta=0.9),
+                    scope=scope,
+                    budget=0.5,
+                )
+                for sample in samples
+            ]
+            with self.subTest(basis=basis, scope=scope):
+                self.assertEqual((samples[0].n_events, samples[1].n_events), (20, 30))
+                self.assertEqual(samples[1].n_left_out, 5)
+                for first, second in zip(covers[0].problems, covers[1].problems):
+                    np.testing.assert_allclose(
+                        [second.objective_value, second.premium],
+                        [first.objective_value, first.premium],
+                        rtol=1e-9,
+                    )
+
 
 class TestCatalogueOnClimada(unittest.TestCase):
     """Catalogue years from the names and the dates of a TropCyclone hazard."""
