@@ -133,6 +133,16 @@ Non-uniqueness and degenerate tails
   smallest weight of an outcome with a loss, so the CVaR is the worst
   outcome alone.
 
+Index diagnostics
+-----------------
+:func:`calibrate` runs
+:func:`~climada_petals.engine.parametric.basis_risk.index_diagnostics` on
+the design sample, logs a warning if the index determines the loss almost
+one-to-one at some unit, and keeps the table in
+:attr:`CalibrationResult.index_diagnostics`; ``summary()`` carries the flag
+(``comonotone_index``). Such a design can replicate the loss on its sample,
+and its objective then reads as if there were no basis risk.
+
 The objective, the premium and the budget all use the sample's outcome
 measure (:mod:`~climada_petals.engine.parametric.measure`): on an annual
 route the events of a year are summed and the CVaR is a CVaR over years; on
@@ -171,6 +181,7 @@ from ._design import (
     unidentified,
 )
 from ._problem import CoverProblem, DesignSample
+from .basis_risk import comonotone_of, diagnose
 from .constraints import FILLS, Budget
 from .cover import ParametricCover
 from .errors import ParametricError, ParametricInputError
@@ -352,6 +363,9 @@ class CalibrationResult:
         (``"feasible"``, ``"infeasible"``, ``"above_budget"`` or
         ``"above_limit"``), ``tied`` (within the tolerance of the best) and
         ``chosen``. None: no grid.
+    index_diagnostics : pandas.DataFrame or None, default None
+        :func:`~climada_petals.engine.parametric.basis_risk.index_diagnostics`
+        of the design sample, at the default threshold.
     """
 
     cover: ParametricCover
@@ -368,6 +382,7 @@ class CalibrationResult:
     unique: bool | None = None
     ties: int | None = None
     profile: pd.DataFrame | None = None
+    index_diagnostics: pd.DataFrame | None = None
 
     def __post_init__(self) -> None:
         """Check the scope and store the mappings read-only."""
@@ -495,7 +510,10 @@ class CalibrationResult:
             Columns ``problem_id``, ``scope``, ``objective`` (the document as
             text), ``objective_value``, ``premium``, ``expected_loss``,
             ``budget_bound``, ``budget_use``, ``loss_weight``,
-            ``degenerate_tail``, ``n_unidentified``, ``unique``, ``ties`` and
+            ``degenerate_tail``, ``comonotone_index`` (whether the index
+            determines the loss of every unit of the problem on the design
+            sample: true, false, or None where a unit's is undefined),
+            ``n_unidentified``, ``unique``, ``ties`` and
             ``n_candidates`` (on a grid, else None), ``route``, ``solver``,
             ``version``, ``method``, ``status``, ``iterations``, ``rounds``
             and ``seconds`` (on a grid, the whole grid's).
@@ -514,6 +532,9 @@ class CalibrationResult:
                     "budget_use": problem.budget_use,
                     "loss_weight": problem.loss_weight,
                     "degenerate_tail": problem.degenerate_tail,
+                    "comonotone_index": comonotone_of(
+                        self.index_diagnostics, problem.unit_id
+                    ),
                     "n_unidentified": sum(
                         len(self.unidentified.get(unit, ())) for unit in problem.unit_id
                     ),
@@ -648,8 +669,38 @@ def _check_arguments(arguments: Setup) -> None:
         arguments.budget.check(arguments.scope, sample.unit_id)
 
 
-def _design(setup: Setup) -> CalibrationResult:
-    """Solve every design problem of a checked calibration (:mod:`._design`)."""
+def _setup(
+    template: ParametricCover,
+    sample: OutcomeSample,
+    objective: Objective,
+    *,
+    scope: str,
+    pricing: Pricing,
+    budget: Budget | None,
+    options: CalibrationOptions,
+) -> Setup:
+    """Return the checked arguments of :func:`calibrate`.
+
+    Raises
+    ------
+    ParametricInputError
+        As :func:`_check_arguments`, and if ``options`` is not
+        ``CalibrationOptions``.
+    """
+    if not isinstance(options, CalibrationOptions):
+        raise ParametricInputError(
+            f"options must be CalibrationOptions, got {options!r}"
+        )
+    setup = Setup(template, sample, objective, scope, pricing, budget, options.settings)
+    _check_arguments(setup)
+    return setup
+
+
+def _design(setup: Setup, diagnostics: pd.DataFrame) -> CalibrationResult:
+    """Solve every design problem of a checked calibration (:mod:`._design`).
+
+    ``diagnostics`` is the design sample's ``index_diagnostics``.
+    """
     units = design_units(setup)
     solved = solve_problems(setup, units)
     cover = resolved_design(setup, units, solved)
@@ -677,6 +728,7 @@ def _design(setup: Setup) -> CalibrationResult:
         unique=None if None in flags else all(flags),
         ties=sum(ties) if ties else None,
         profile=pd.concat(profiles, ignore_index=True) if profiles else None,
+        index_diagnostics=diagnostics,
     )
 
 
@@ -723,7 +775,7 @@ def calibrate(
     CalibrationResult
         The resolved cover, one :class:`CoverProblem` per design problem,
         the unidentified amounts, the ranges and the grid's profile where
-        there are, and the design sample's record.
+        there are, the design sample's record and its index diagnostics.
 
     Raises
     ------
@@ -764,13 +816,16 @@ def calibrate(
     ... )
     >>> result.cover.write_json("cover.json")  # doctest: +SKIP
     """
-    if not isinstance(options, CalibrationOptions):
-        raise ParametricInputError(
-            f"options must be CalibrationOptions, got {options!r}"
-        )
-    setup = Setup(template, sample, objective, scope, pricing, budget, options.settings)
-    _check_arguments(setup)
-    return _design(setup)
+    setup = _setup(
+        template,
+        sample,
+        objective,
+        scope=scope,
+        pricing=pricing,
+        budget=budget,
+        options=options,
+    )
+    return _design(setup, diagnose(setup.sample, "calibrate"))
 
 
 def _frontier_budgets(budgets: object) -> list[Budget]:
@@ -846,7 +901,8 @@ def calibrate_frontier(
     (:func:`~climada_petals.engine.parametric.evaluate.evaluate`) for
     out-of-sample numbers.
 
-    Each design's non-uniqueness is in its rows (``unique``, ``ties``,
+    The index diagnostics run once, on the design sample, as in
+    :func:`calibrate`. Each design's non-uniqueness is in its rows (``unique``, ``ties``,
     ``n_unidentified``): where a design is not unique, its amounts are one
     member of a set of optimal designs, and they may jump between
     neighbouring budgets. ``CalibrationOptions(ranges=True)`` ranges every
@@ -904,9 +960,10 @@ def calibrate_frontier(
     >>> frontier[["budget_ratio", "problem_id", "objective_value", "premium"]]  # doctest: +SKIP
     """
     frames = []
+    diagnostics = None
     for budget in _frontier_budgets(budgets):
         try:
-            result = calibrate(
+            setup = _setup(
                 template,
                 sample,
                 objective,
@@ -915,6 +972,9 @@ def calibrate_frontier(
                 budget=budget,
                 options=options,
             )
+            if diagnostics is None:
+                diagnostics = diagnose(setup.sample, "calibrate_frontier")
+            result = _design(setup, diagnostics)
         except ParametricError as error:
             error.add_note(f"raised by calibrate_frontier at {budget!r}")
             raise

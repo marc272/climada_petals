@@ -712,7 +712,7 @@ class TestImpacts(unittest.TestCase):
             payout_impact(self.design, self.sample, impact=rescaled)
         self.assertEqual(other.n_events, 41)
 
-    def test_draws_have_no_uncovered_impact(self) -> None:
+    def test_draws_need_a_draw_for_their_uncovered_impact(self) -> None:
         drawn = OutcomeSample(
             self.sample.index,
             np.vstack([self.sample.loss.toarray()] * 2),
