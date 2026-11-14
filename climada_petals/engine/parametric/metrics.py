@@ -606,7 +606,9 @@ def setup_text(table: pd.DataFrame | pd.Series) -> str:
 
     Every aspect lists the values its rows take: the split, the basis and
     route, the scenario, the index, the pricing and premium, the scope, the
-    levels and units, and the payout threshold.
+    levels and units, and the payout threshold. Scenario labels are separated
+    by semicolons, since a label such as ``"rcp45, 2040 to 2080"`` may hold a
+    comma.
 
     Parameters
     ----------
@@ -644,7 +646,7 @@ def setup_text(table: pd.DataFrame | pd.Series) -> str:
     lines = [
         f"Split: {'; '.join(splits)}",
         f"Basis: {_basis_text(frame)}",
-        f"Scenario: {', '.join(str(s) for s in _distinct(frame, 'scenario'))}",
+        f"Scenario: {'; '.join(str(s) for s in _distinct(frame, 'scenario'))}",
         f"Index: {'; '.join(_distinct(frame, 'index_definition'))}",
         f"Pricing: {', '.join(_distinct(frame, 'pricing'))}; premium: "
         f"{', '.join(premiums) or 'none'}",

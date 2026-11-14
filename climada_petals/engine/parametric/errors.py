@@ -36,6 +36,7 @@ __all__ = [
     "MissingDependencyError",
     "ParametricError",
     "ParametricInputError",
+    "ScenarioError",
     "UnboundedCalibrationError",
     "UnitMappingError",
     "UnknownPayoutKindError",
@@ -100,6 +101,16 @@ class LeakageError(ParametricInputError):
     Examples: a training and a test sample with a common event, or with
     members of one parent storm on both sides, or a split of catalogue years
     that no contiguous cut can make without splitting a block.
+    """
+
+
+class ScenarioError(ParametricInputError):
+    """Scenarios that a comparison or a mixture puts together don't fit.
+
+    Examples: two scenarios of a set on other routes (the event basis and
+    catalogue years, say), on other insured units or index definitions, or
+    the members of one scenario with other exposures, other numbers of
+    draws, or from other splits.
     """
 
 

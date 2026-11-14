@@ -88,7 +88,7 @@ from climada_petals.util.config import LOGGER
 from ._checks import check_int, check_real, finite_array, read_only
 from ._draws import ImpactLosses, impact_losses, take_events
 from .annual import CatalogueYears, YearSets, sample_years
-from .errors import LeakageError, ParametricInputError
+from .errors import LeakageError, ParametricInputError, ScenarioError
 from .index import ParametricIndex
 from .measure import CATALOGUE, YEARSETS, EventBasis, OutcomeMeasure
 from .units import InsuredUnits
@@ -478,7 +478,10 @@ class OutcomeSample:
         ParametricInputError
             If a key is not the sample's, the part holds no event, or
             ``rng`` is missing on year sets or given on another route.
+        ScenarioError
+            If the sample mixes a scenario's members on an annual route.
         """
+        _check_sample(self, split=True)
         part = _Part("select", "selected")
         if isinstance(self.basis, CatalogueYears):
             _no_rng(rng)
@@ -533,8 +536,10 @@ def holdout(
     ParametricInputError
         If ``train_fraction`` is out of range, a side would be empty, or
         ``rng`` is missing or not wanted.
+    ScenarioError
+        If the sample mixes a scenario's members on an annual route.
     """
-    _check_sample(sample)
+    _check_sample(sample, split=True)
     fraction = check_real(
         "train_fraction",
         train_fraction,
@@ -590,8 +595,10 @@ def year_block_kfold(
     ParametricInputError
         If ``k`` is invalid, a fold would be empty, or ``rng`` is missing or
         not wanted.
+    ScenarioError
+        If the sample mixes a scenario's members on an annual route.
     """
-    _check_sample(sample)
+    _check_sample(sample, split=True)
     folds = check_int("k", k, low=2)
     pairs = []
     if sample.route == CATALOGUE:
@@ -754,12 +761,15 @@ def _check_parts(index: object, units: object, basis: object) -> None:
         raise ParametricInputError("the sample holds no event")
 
 
-def _check_sample(sample: object) -> None:
-    """Raise unless ``sample`` is an :class:`OutcomeSample`."""
+def _check_sample(sample: object, *, split: bool = False) -> None:
+    """Raise unless ``sample`` is an :class:`OutcomeSample`; to ``split``, not a mixture's."""
     if not isinstance(sample, OutcomeSample):
         raise ParametricInputError(
             f"sample must be an OutcomeSample, got {type(sample).__name__}"
         )
+    refusal = getattr(sample.basis, "split_refusal", None) if split else None
+    if refusal:
+        raise ScenarioError(refusal)
 
 
 def _no_rng(rng: object) -> None:

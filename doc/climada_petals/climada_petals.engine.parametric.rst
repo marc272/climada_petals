@@ -25,6 +25,14 @@ climada\_petals\.engine\.parametric\.\_grid module
     :undoc-members:
     :show-inheritance:
 
+climada\_petals\.engine\.parametric\.\_mixture module
+-----------------------------------------------------
+
+.. automodule:: climada_petals.engine.parametric._mixture
+    :members:
+    :undoc-members:
+    :show-inheritance:
+
 climada\_petals\.engine\.parametric\.\_problem module
 -----------------------------------------------------
 
@@ -181,6 +189,14 @@ climada\_petals\.engine\.parametric\.sample module
 --------------------------------------------------
 
 .. automodule:: climada_petals.engine.parametric.sample
+    :members:
+    :undoc-members:
+    :show-inheritance:
+
+climada\_petals\.engine\.parametric\.scenarios module
+-----------------------------------------------------
+
+.. automodule:: climada_petals.engine.parametric.scenarios
     :members:
     :undoc-members:
     :show-inheritance:
