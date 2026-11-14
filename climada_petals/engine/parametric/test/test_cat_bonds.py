@@ -444,10 +444,11 @@ class TestCalibrationAgainstCobyla(unittest.TestCase):
 
     def test_against_a_fit_with_inverted_triggers(self) -> None:
         # COBYLA is unconstrained. From the initial guess (5, 1) it keeps
-        # min_trig > max_trig on this data, where calc_payout pays max_pay
-        # from max_trig on (test_inverted_triggers_pay_as_a_binary_payout),
-        # and the design on the grid is about 97 % below what it pays.
-        # Whichever way the fit lands, the design reaches what it pays.
+        # min_trig > max_trig on this data (scipy 1.18), where calc_payout
+        # pays max_pay from max_trig on
+        # (test_inverted_triggers_pay_as_a_binary_payout), and the design
+        # on the grid is 97 % (A) and 96 % (B) below what it pays. Whichever
+        # way the fit lands, the design reaches what it pays.
         inverted = cobyla(self.case, initial_guess=(5.0, 1.0))
         reached = squared_error(self.loss, self.paid_by(inverted))
         np.testing.assert_array_less(
