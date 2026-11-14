@@ -219,9 +219,12 @@ def _degenerate(diagnostics: Mapping[str, Any]) -> str | None:
 def _design_cover(result: CalibrationResult, sample: OutcomeSample) -> ParametricCover:
     """Return the terms of a calibration result, on the sample's index definition.
 
-    The levels are written as found, with rounding below 0 or below the
-    previous level of a monotone payout removed (the solver meets the
-    constraints to its tolerance). The payouts are the result's own.
+    A calibration result records neither its index definition nor its
+    payout unit, so the cover takes the evaluation sample's definition and
+    the unit of its exposures' values. The levels are written as found,
+    with rounding below 0 or below the previous level of a monotone payout
+    removed (the solver meets the constraints to its tolerance), for the
+    hash. The payouts evaluated are the result's own.
     """
     levels = np.maximum(result.levels, 0.0)
     if result.payout.monotone:

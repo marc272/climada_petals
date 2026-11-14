@@ -27,6 +27,7 @@ They are dedicated to the public domain (CC0-1.0); every sample records it.
 
 from __future__ import annotations
 
+import itertools
 import json
 import math
 import tempfile
@@ -601,11 +602,14 @@ class TestImpacts(unittest.TestCase):
         self.assertEqual(len(exceedance), self.sample.units.n_points)
 
     def test_a_write_hdf5_round_trip(self) -> None:
-        for function in (payout_impact, uncovered_impact):
-            written = function(self.design, self.sample, impact=self.impact)
+        cases = itertools.product(
+            (payout_impact, uncovered_impact), (None, self.impact)
+        )
+        for function, impact in cases:
+            written = function(self.design, self.sample, impact=impact)
             with (
                 tempfile.TemporaryDirectory() as folder,
-                self.subTest(function=function),
+                self.subTest(function=function, impact=impact is not None),
             ):
                 path = Path(folder) / "impact.hdf5"
                 written.write_hdf5(path)
