@@ -79,6 +79,7 @@ Jump right in:
    Hazard <tutorial/hazard>
    tutorial/climada_engine_SupplyChain
    tutorial/climada_engine_CATBonds
+   tutorial/climada_engine_Parametric
    tutorial/climada_entity_BlackMarble
    tutorial/climada_exposures_openstreetmap
    tutorial/climada_hazard_drought
