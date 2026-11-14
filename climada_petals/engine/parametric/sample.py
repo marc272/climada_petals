@@ -92,7 +92,7 @@ the token of its members' tokens, in order
 (:mod:`~climada_petals.engine.parametric._mixture`).
 
 :func:`check_out_of_sample` compares a design sample with an evaluation
-sample only when they have one token, and then raises on a shared event or
+sample when they have one token, and then raises on a shared event or
 block, as :func:`check_no_leakage` does. Event ids and years alone can't
 decide it: another hazard set's can coincide with the design sample's by
 chance. A design on a baseline is therefore compared with a
@@ -102,13 +102,32 @@ of sample on a side cut with the same blocks
 :func:`~climada_petals.engine.parametric.evaluate.evaluate` runs the check
 on every out-of-sample evaluation of a design, so that label is always
 checked.
+
+Parent storms
+-------------
+Some block labels name the same storm in every hazard set: the parents of
+CLIMADA's perturbed tracks, ``<sid>_gen<m>``, read with
+:data:`~climada_petals.engine.parametric.measure.ENSEMBLE_PARENT`. The Data
+API's future ``random_walk`` sets of a country, for one, hold the present
+set's parent storms with other footprints, so their tokens differ. A
+sample's events have **parent storms**, :attr:`OutcomeSample.parents`, when
+its blocks are those names (the rule of
+:mod:`~climada_petals.engine.parametric._parts`, "Parent storms"); other
+blocks (years, ``event_id // 100``, a user's labels) are local. Parent
+storms are compared whatever the tokens: :func:`check_no_leakage` and
+:func:`check_out_of_sample` raise when the two samples share one, since a
+shared parent is leakage (an evaluation on members of a storm the design
+was calibrated on). Splits keep a parent's events on one side, and
+:meth:`~climada_petals.engine.parametric.scenarios.ScenarioSet.holdout`
+cuts samples that share parents with their sides.
 """
 
 from __future__ import annotations
 
 import math
-from collections.abc import Hashable, Sequence
+from collections.abc import Hashable, Mapping, Sequence
 from dataclasses import dataclass, field
+from types import MappingProxyType
 from typing import Any
 
 import numpy as np
@@ -125,6 +144,8 @@ from ._parts import (
     check_rng,
     kfold_pairs,
     no_rng,
+    parent_labels,
+    parents_in,
     pool_part,
     source_token,
     train_test,
@@ -189,6 +210,12 @@ class OutcomeSample:
         The source token: that of the whole sample this one was cut from,
         which every part keeps. Default: the fingerprint of the index's
         event ids and values (module docstring, "Lineage").
+    parents : mapping of int to str, optional
+        The parent storm of each event that has one, by event id, named
+        alike in every hazard set (module docstring, "Parent storms"); every
+        part keeps it. Default: the blocks, if they are the parents' names
+        read from the event names with ``ENSEMBLE_PARENT``, else none. Give
+        it for parents the rule doesn't read.
 
     Attributes
     ----------
@@ -217,6 +244,7 @@ class OutcomeSample:
     split: SplitRecord | None = field(default=None, kw_only=True)
     n_left_out: int = field(default=0, kw_only=True)
     source: str | None = field(default=None, kw_only=True, repr=False)
+    parents: Mapping[int, str] | None = field(default=None, kw_only=True, repr=False)
     measure: OutcomeMeasure = field(init=False, repr=False)
 
     def __post_init__(self) -> None:
@@ -262,6 +290,7 @@ class OutcomeSample:
         else:
             measure = self.basis.measure(self.index.event_id, frequency, n_draws=draws)
         object.__setattr__(self, "measure", measure)
+        object.__setattr__(self, "parents", _parents(self.parents, self))
 
     @classmethod
     def from_impact(
@@ -655,7 +684,9 @@ def check_no_leakage(design: Any, evaluation: OutcomeSample) -> None:
     Use it on samples split from one sample, such as the sides of
     :func:`holdout`. Samples of different hazard sets can share event ids
     or years by chance, so a shared id says nothing about them:
-    :func:`check_out_of_sample` compares only samples of one source.
+    :func:`check_out_of_sample` compares their events and blocks only for
+    samples of one source. Parent storms (module docstring) are compared
+    too, here and there.
 
     Parameters
     ----------
@@ -669,8 +700,8 @@ def check_no_leakage(design: Any, evaluation: OutcomeSample) -> None:
     Raises
     ------
     LeakageError
-        If an event, or a block (an ensemble's parent, or a catalogue year),
-        is in both.
+        If an event, a block (an ensemble's parent, or a catalogue year) or
+        a parent storm is in both.
     ParametricInputError
         If an argument is neither.
     """
@@ -688,17 +719,33 @@ def check_no_leakage(design: Any, evaluation: OutcomeSample) -> None:
             "events of a block (an ensemble's parent, or a catalogue year) belong "
             "on one side"
         )
+    _check_parents(design, evaluation)
+
+
+def _check_parents(design: Any, evaluation: OutcomeSample) -> None:
+    """Raise if two samples share a parent storm (module docstring)."""
+    shared = sorted(parents_in(design) & parents_in(evaluation))
+    if shared:
+        raise LeakageError(
+            f"{len(shared)} parent storms are in both samples, e.g. {shared[:5]}: "
+            "a parent storm (OutcomeSample.parents, read from the names of "
+            "CLIMADA's perturbed tracks) is the same storm in every hazard set, so "
+            "the evaluation holds members of storms the design was calibrated on. "
+            "Cut the hazard sets with ScenarioSet.holdout, which keeps each parent "
+            "on one side"
+        )
 
 
 def check_out_of_sample(design: Any, evaluation: OutcomeSample) -> None:
-    """Raise if a sample of the design sample's source shares an event or a block.
+    """Raise if an evaluation sample shares events, blocks or parents with a design's.
 
-    The check of an out-of-sample evaluation (module docstring, "Lineage").
-    The two are compared only if they have one source token: then the
-    evaluation sample is the whole sample the design sample was cut from,
-    another part of it, or the design sample itself, and
-    :func:`check_no_leakage` decides. Samples of other sources are not
-    compared, since their event ids and years can coincide by chance.
+    The check of an out-of-sample evaluation (module docstring, "Lineage"
+    and "Parent storms"). If the two have one source token, the evaluation
+    sample is the whole sample the design sample was cut from, another part
+    of it, or the design sample itself, and :func:`check_no_leakage`
+    decides. Samples of other sources are compared by their parent storms
+    only, since their event ids, years and other block labels can coincide
+    by chance.
 
     Parameters
     ----------
@@ -711,7 +758,8 @@ def check_out_of_sample(design: Any, evaluation: OutcomeSample) -> None:
     Raises
     ------
     LeakageError
-        If the two have one source and an event, or a block, is in both.
+        If the two have one source and an event or a block is in both, or a
+        parent storm is in both.
     ParametricInputError
         If an argument is neither.
     """
@@ -720,6 +768,30 @@ def check_out_of_sample(design: Any, evaluation: OutcomeSample) -> None:
     source = getattr(design, "source", None)
     if source is not None and source == evaluation.source:
         check_no_leakage(design, evaluation)
+    else:
+        _check_parents(design, evaluation)
+
+
+def _parents(given: object, sample: OutcomeSample) -> Mapping[int, str]:
+    """Return a sample's parent storms, read-only: as given, or by the rule.
+
+    Raises
+    ------
+    ParametricInputError
+        If ``given`` is not a mapping of int event ids to non-empty str.
+    """
+    if given is None:
+        return MappingProxyType(parent_labels(sample.index, sample.block))
+    valid = isinstance(given, Mapping) and all(
+        isinstance(event, (int, np.integer)) and isinstance(label, str) and label
+        for event, label in given.items()
+    )
+    if not valid:
+        raise ParametricInputError(
+            "parents must map event ids (int) to parent storms (non-empty str), got "
+            f"{type(given).__name__}"
+        )
+    return MappingProxyType({int(event): label for event, label in given.items()})
 
 
 def _check_design(design: object) -> None:

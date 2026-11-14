@@ -61,7 +61,10 @@ from CLIMADA's ``Hazard``, ``TCTracks``, ``Exposures`` and ``Impact``:
   sides (:func:`check_no_leakage`, :class:`LeakageError`). Every part of a
   sample, a side or :meth:`~OutcomeSample.unit`, keeps its source token
   (:attr:`~OutcomeSample.source`), so an out-of-sample evaluation of a
-  design is always checked against the sample it was cut from.
+  design is always checked against the sample it was cut from. Parent
+  storms read from the names of CLIMADA's perturbed tracks
+  (:attr:`~OutcomeSample.parents`) are checked across hazard sets too, such
+  as a present and a future set of one country.
 * **Objectives:** :class:`WeightedCVaR`, the tail objective
   ``alpha CVaR_beta(U) + (1 - alpha) E[U]`` of the uncovered loss ``U``,
   next to :class:`ExpectedUncovered` (``E[U]``) and :class:`MSE`. The first

@@ -29,7 +29,7 @@ calibration result.
 
 from __future__ import annotations
 
-from collections.abc import Hashable, Sequence
+from collections.abc import Hashable, Mapping, Sequence
 from dataclasses import dataclass, field
 from functools import cached_property
 from typing import Any, Final
@@ -352,7 +352,12 @@ class DesignSample:
     source : str or None, default None
         The sample's source token
         (:attr:`~climada_petals.engine.parametric.sample.OutcomeSample.source`).
-        A record without one is compared with no evaluation sample.
+        A record without one is compared with no evaluation sample by its
+        events and blocks.
+    parents : mapping of int to str, default empty
+        The parent storm of each of the sample's events that has one
+        (:attr:`~climada_petals.engine.parametric.sample.OutcomeSample.parents`),
+        compared with every evaluation sample's.
     """
 
     basis: str
@@ -367,6 +372,7 @@ class DesignSample:
     years: NDArray[np.int64] | None
     split: SplitRecord | None
     source: str | None = None
+    parents: Mapping[int, str] = field(default_factory=dict)
 
     @classmethod
     def from_sample(cls, sample: OutcomeSample) -> DesignSample:
@@ -384,4 +390,9 @@ class DesignSample:
             years=sample.years,
             split=sample.split,
             source=sample.source,
+            parents={
+                event: sample.parents[event]
+                for event in sample.event_id.tolist()
+                if event in sample.parents
+            },
         )
