@@ -72,25 +72,33 @@ both splits run it on their sides.
 
 Lineage
 -------
-Every sample has a **source token**, :attr:`OutcomeSample.source`. A whole
-sample's token is the fingerprint of its events: their ids, frequencies,
-index values and losses, with the unit ids, in the order of the event ids,
-whatever the basis. Every part of it keeps that token: the sides of
-:func:`holdout` and :func:`year_block_kfold`, a :meth:`~OutcomeSample.select`
-and a :meth:`~OutcomeSample.unit`. So two samples have one token when they
-hold the same events with the same data, such as two samples of the same
-index and ``Impact`` on two bases, or when one was cut from the other, or
-both from one sample. A mixture of a scenario's members has the token of
-its members' tokens, in order
+Every sample has a **source token**, :attr:`OutcomeSample.source`, which
+identifies its event set. A whole sample's token is the fingerprint of its
+index: the event ids and the index values, with the unit ids, in the order
+of the event ids (:meth:`~OutcomeSample.from_impact` and
+:meth:`~OutcomeSample.from_impact_draws` take the index they are given,
+before events are left out). The frequencies, the losses, the draws and
+the basis are not part of it. Every part keeps its sample's token: the
+sides of :func:`holdout` and :func:`year_block_kfold`, a
+:meth:`~OutcomeSample.select` and a :meth:`~OutcomeSample.unit`. So two
+samples have one token when they hold the same events: one cut from the
+other, or both from one sample, or two samples of one index on two bases,
+with other frequencies (a set scaled by ``apply_climate_scenario_knu``),
+other exposures or impact-function draws. Another hazard set has another
+token, since its index values differ even where its event ids coincide;
+so does an index that other exposures change, such as one weighted by the
+values of each scenario's own units. A mixture of a scenario's members has
+the token of its members' tokens, in order
 (:mod:`~climada_petals.engine.parametric._mixture`).
 
 :func:`check_out_of_sample` compares a design sample with an evaluation
 sample only when they have one token, and then raises on a shared event or
 block, as :func:`check_no_leakage` does. Event ids and years alone can't
 decide it: another hazard set's can coincide with the design sample's by
-chance. A sample of the same events with other frequencies, exposures or
-impact functions (a frequency-scaled set, impact-function draws) has
-another token, as another scenario: it is not compared.
+chance. A design on a baseline is therefore compared with a
+frequency-scaled set of it, which holds the same events: evaluate it out
+of sample on a side cut with the same blocks
+(:meth:`~climada_petals.engine.parametric.scenarios.ScenarioSet.holdout`).
 :func:`~climada_petals.engine.parametric.evaluate.evaluate` runs the check
 on every out-of-sample evaluation of a design, so that label is always
 checked.
@@ -179,8 +187,8 @@ class OutcomeSample:
         index of 0 at every unit (module docstring).
     source : str, optional
         The source token: that of the whole sample this one was cut from,
-        which every part keeps. Default: the fingerprint of the sample's
-        own events (module docstring, "Lineage").
+        which every part keeps. Default: the fingerprint of the index's
+        event ids and values (module docstring, "Lineage").
 
     Attributes
     ----------
@@ -239,9 +247,7 @@ class OutcomeSample:
         years = _sample_years(self.basis, self.years)
         loss = _loss(self.loss, shape)
         if self.source is None:
-            object.__setattr__(
-                self, "source", source_token(self.index, frequency, loss, draws)
-            )
+            object.__setattr__(self, "source", source_token(self.index))
         object.__setattr__(self, "loss", loss)
         object.__setattr__(self, "frequency", read_only(frequency))
         object.__setattr__(self, "years", years)
@@ -310,7 +316,8 @@ class OutcomeSample:
             index.
         """
         _check_parts(index, units, basis)
-        return cls._of(impact_losses(index, [impact], units), units, basis, scenario)
+        found = impact_losses(index, [impact], units)
+        return cls._of(found, units, basis, scenario, source=source_token(index))
 
     @classmethod
     def from_impact_draws(
@@ -363,11 +370,18 @@ class OutcomeSample:
             sequence.
         """
         _check_parts(index, units, basis)
-        return cls._of(impact_losses(index, impacts, units), units, basis, scenario)
+        found = impact_losses(index, impacts, units)
+        return cls._of(found, units, basis, scenario, source=source_token(index))
 
     @classmethod
     def _of(
-        cls, found: ImpactLosses, units: InsuredUnits, basis: Basis, scenario: str
+        cls,
+        found: ImpactLosses,
+        units: InsuredUnits,
+        basis: Basis,
+        scenario: str,
+        *,
+        source: str,
     ) -> OutcomeSample:
         """Return the sample of the kept events of one or several impacts."""
         return cls(
@@ -379,6 +393,7 @@ class OutcomeSample:
             n_draws=found.n_draws,
             scenario=scenario,
             n_left_out=found.n_left_out,
+            source=source,
         )
 
     @property

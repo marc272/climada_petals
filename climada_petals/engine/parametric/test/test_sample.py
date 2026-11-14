@@ -781,41 +781,46 @@ class TestLineage(unittest.TestCase):
             with self.assertRaisesRegex(ParametricInputError, "source must be"):
                 OutcomeSample(*arrays, sample.basis, source=bad)
 
-    def test_the_token_is_that_of_the_events_data(self) -> None:
-        values, loss = [[30.0], [60.0], [45.0]], [[4.0], [10.0], [0.0]]
+    def test_the_token_is_that_of_the_event_set(self) -> None:
+        # Event 3 has no loss and an index of 0, so from_impact leaves it out.
+        values, loss = [[30.0], [60.0], [0.0]], [[4.0], [10.0], [0.0]]
         index, impact, units = array_index(values, loss, frequency=0.1)
         on_events = OutcomeSample.from_impact(
             index, impact, units=units, basis=EventBasis()
         )
+        self.assertEqual(on_events.n_left_out, 1)
         years = CatalogueYears.from_labels(impact.event_id, [0, 3, 5], n_years=10)
         on_years = OutcomeSample.from_impact(index, impact, units=units, basis=years)
         self.assertEqual(on_years.source, on_events.source)
+        # Draws of the same events, one with a loss at event 3, which it keeps;
+        # other frequencies, as a scaled set has; other losses: one token.
+        _, draw, _ = array_index(values, [[5.0], [9.0], [2.0]], frequency=0.1)
+        draws = OutcomeSample.from_impact_draws(
+            index, [impact, draw], units=units, basis=EventBasis()
+        )
+        self.assertEqual((draws.n_draws, draws.n_events), (2, 3))
+        _, scaled, _ = array_index(values, loss, frequency=[0.05, 0.1, 0.3])
+        _, other_loss, _ = array_index(values, [[1.0], [2.0], [0.0]], frequency=0.1)
+        for impact_of_same_events in (scaled, other_loss):
+            self.assertEqual(
+                OutcomeSample.from_impact(
+                    index, impact_of_same_events, units=units, basis=EventBasis()
+                ).source,
+                on_events.source,
+            )
+        self.assertEqual(draws.source, on_events.source)
         definition = index.definition
 
-        def built(ids: Any, freq: Any, vals: Any, losses: Any, draws: int = 1) -> str:
+        def built(ids: Any, vals: Any) -> str:
             given = ParametricIndex(vals, ids, units.unit_id, definition)
-            return OutcomeSample(
-                given, losses, freq, units, EventBasis(), n_draws=draws
-            ).source
+            return OutcomeSample(given, loss, [0.1] * 3, units, EventBasis()).source
 
-        # The constructor on the same arrays, and on the events in another
-        # order, gives the same token.
-        same = ([1, 2, 3], [0.1] * 3, values, loss)
-        self.assertEqual(built(*same), on_events.source)
-        order = [2, 0, 1]
-        reordered = [np.asarray(part)[order] for part in same]
-        self.assertEqual(built(*reordered), on_events.source)
-        others = {
-            "event_id": ([1, 2, 4], [0.1] * 3, values, loss),
-            "frequency": ([1, 2, 3], [0.1, 0.1, 0.2], values, loss),
-            "index": ([1, 2, 3], [0.1] * 3, [[30.0], [60.0], [46.0]], loss),
-            "loss": ([1, 2, 3], [0.1] * 3, values, [[4.0], [10.0], [1.0]]),
-        }
-        for name, parts in others.items():
-            with self.subTest(changed=name):
-                self.assertNotEqual(built(*parts), on_events.source)
-        twice = ([1, 2, 3], [0.1] * 3, values, loss + loss, 2)
-        self.assertNotEqual(built(*twice), on_events.source)
+        # The constructor on the index, also with its events in another order,
+        # gives the same token; other event ids or index values another.
+        self.assertEqual(built([1, 2, 3], values), on_events.source)
+        self.assertEqual(built([3, 1, 2], [[0.0], [30.0], [60.0]]), on_events.source)
+        self.assertNotEqual(built([1, 2, 4], values), on_events.source)
+        self.assertNotEqual(built([1, 2, 3], [[30.0], [60.0], [1.0]]), on_events.source)
 
 
 class TestUnit(unittest.TestCase):

@@ -17,11 +17,13 @@ with CLIMADA. If not, see <https://www.gnu.org/licenses/>.
 ---
 
 Tests of scenario sets: a fixed cover on each scenario, one design per
-scenario, mixtures of windows or members, and the route they share.
+scenario, mixtures of windows or members, the route they share, and the
+splits of members of one event set.
 """
 
 from __future__ import annotations
 
+import copy
 import datetime as dt
 import unittest
 from collections.abc import Callable
@@ -344,33 +346,60 @@ class TestClimateScenarioKnu(unittest.TestCase):
                 delta=1e-12 * row["expected_payout"],
             )
 
-    def test_a_design_keeps_its_premium_under_the_scenario(self) -> None:
-        scenarios = self._set(EventBasis())
+    def _design_on_the_training_side(self) -> tuple[Any, Any, Any]:
+        """Return the sets' training and test sides, and a baseline design.
+
+        With this seed the training side holds events 2 and 3, and the test
+        side event 1, in both members.
+        """
+        train, test = self._set(EventBasis()).holdout(rng=np.random.default_rng(3))
         result = calibrate(
             template(
-                scenarios.sample("baseline"),
+                train.sample("baseline"),
                 StepPayout([35.0, 50.0], [Free(), Free()]),
             ),
-            scenarios.sample("baseline"),
+            train.sample("baseline"),
             ExpectedUncovered(),
             scope="joint",
             budget=Budget(ratio=1.0),
         )
-        table = evaluate_scenarios(
-            result,
-            scenarios,
-            split={"baseline": "in_sample", "rcp85, 2080": "out_of_sample"},
-        )
-        self.assertEqual(list(table["split"]), ["in_sample", "out_of_sample"])
+        return train, test, result
+
+    def test_a_design_keeps_its_premium_under_the_scenario(self) -> None:
+        # The scaled set holds the baseline's events, so the design is
+        # evaluated out of sample on its test side, cut with the baseline's.
+        _, test, result = self._design_on_the_training_side()
+        table = evaluate_scenarios(result, test, split="out_of_sample")
+        self.assertEqual(list(table["split"]), ["out_of_sample"] * 2)
         future = _total(table, "rcp85, 2080")
         self.assertAlmostEqual(future["premium"], result.premium)
         self.assertEqual(future["premium_basis"], "design")
-        paid = result.cover.payout_matrix(scenarios.sample("rcp85, 2080").index)
+        paid = result.cover.payout_matrix(test.sample("rcp85, 2080").index)
+        self.assertGreater(paid.sum(), 0.0)
         self.assertAlmostEqual(
             future["premium_repriced"],
-            float(scenarios.sample("rcp85, 2080").frequency @ paid.sum(axis=1)),
+            float(test.sample("rcp85, 2080").frequency @ paid.sum(axis=1)),
             delta=1e-12 * future["premium_repriced"],
         )
+
+    def test_the_scaled_set_is_cut_with_the_baselines_blocks(self) -> None:
+        scenarios = self._set(EventBasis())
+        baseline, future = (scenarios.sample(label) for label in scenarios.labels)
+        self.assertEqual(future.source, baseline.source)
+        train, test, result = self._design_on_the_training_side()
+        for side, events in ((train, [2, 3]), (test, [1])):
+            for label in scenarios.labels:
+                np.testing.assert_array_equal(side.sample(label).event_id, events)
+            # Each member keeps its own lambda.
+            self.assertAlmostEqual(
+                side.sample("rcp85, 2080").frequency.sum(), future.frequency.sum()
+            )
+        # The whole scaled set holds the design's training events.
+        for whole in (baseline, future):
+            with self.assertRaisesRegex(LeakageError, "2 events are in both"):
+                evaluate(result, whole, split="out_of_sample")
+        with self.assertRaisesRegex(LeakageError, "2 events are in both"):
+            evaluate_scenarios(result, scenarios, split="out_of_sample")
 
     def test_routes(self) -> None:
         with self.assertRaises(YearRouteError) as found:
@@ -588,6 +617,64 @@ class TestMixtures(unittest.TestCase):
             outer.measure.expectation(outer.loss.toarray()[:, 0]), sum(losses) / 2
         )
         self.assertAlmostEqual(float(outer.basis.year_weight.sum()), 1.0)
+
+
+class TestMembersOfOneSource(unittest.TestCase):
+    """``ScenarioSet.holdout`` cuts the members of one event set alike, or raises."""
+
+    def setUp(self) -> None:
+        self.sample, self.impact = random_portfolio(5)
+
+    def _again(self, basis: Any, frequency: float | None = None) -> OutcomeSample:
+        """Return a sample of the same index on ``basis``, at ``frequency``."""
+        impact = copy.deepcopy(self.impact)
+        if frequency is not None:
+            impact.frequency = np.full(impact.frequency.size, frequency)
+        return OutcomeSample.from_impact(
+            self.sample.index, impact, units=self.sample.units, basis=basis
+        )
+
+    def test_catalogue_members_take_the_same_years(self) -> None:
+        again = self._again(self.sample.basis)
+        self.assertEqual(again.source, self.sample.source)
+        for side in ScenarioSet({"a": self.sample, "b": again}).holdout():
+            for name in ("years", "event_id"):
+                np.testing.assert_array_equal(
+                    getattr(side.sample("b"), name), getattr(side.sample("a"), name)
+                )
+
+    def test_members_that_cant_be_cut_alike_raise(self) -> None:
+        ids, year = self.impact.event_id, self.sample.event_year
+        on_events, impact = random_portfolio(5, basis="event")
+        parents = OutcomeSample.from_impact(
+            on_events.index,
+            impact,
+            units=on_events.units,
+            basis=EventBasis(event_id=ids, block=[f"P{k // 2}" for k in ids]),
+        )
+        cases = {
+            "80 simulation years, 0 to 79": (
+                self.sample,
+                self._again(CatalogueYears.from_labels(ids, year, n_years=80), 1 / 80),
+            ),
+            "labels differ": (
+                self.sample,
+                self._again(CatalogueYears.from_labels(ids, year[::-1], n_years=60)),
+            ),
+            "on neither side": (on_events, parents),
+        }
+        for match, (first, second) in cases.items():
+            with (
+                self.subTest(match=match),
+                self.assertRaisesRegex(ScenarioError, match) as found,
+            ):
+                ScenarioSet({"a": first, "b": second}).holdout(
+                    rng=None if first.route == "catalogue" else np.random.default_rng(1)
+                )
+            self.assertIn(
+                "raised by ScenarioSet.holdout at scenario 'b'",
+                found.exception.__notes__,
+            )
 
 
 class TestSplitsOfMixtures(unittest.TestCase):
@@ -1170,6 +1257,8 @@ class TestCalibratePerScenario(unittest.TestCase):
         )
         train, test = scenarios.holdout(rng=np.random.default_rng(13))
         sides = train.members["w"]
+        # The two members are one sample, so they are cut with the same blocks.
+        np.testing.assert_array_equal(sides[0].event_id, sides[1].event_id)
         self.assertEqual(train.sample("w").n_years, sum(side.n_years for side in sides))
         expected = [
             side.measure.expectation(side.loss.sum(axis=1).A1) for side in sides

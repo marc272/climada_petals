@@ -110,7 +110,9 @@ index definition, and so every table, is the same for both.
 Splits and leakage
 ------------------
 Split the members, not a mixture: :meth:`ScenarioSet.holdout` splits each
-member and returns a training and a test set with the same labels. On an
+member and returns a training and a test set with the same labels; members
+of one source, such as a baseline and its frequency-scaled set, are cut
+with the same blocks. On an
 annual route a split of the mixture itself would not mix the members'
 sides (on year sets, one year would hold the events of several members),
 so ``holdout``, ``year_block_kfold`` and ``select`` raise
@@ -132,10 +134,14 @@ say nothing about each other, so the mixture keeps them apart
 members counts as two blocks.
 
 A set scaled by ``apply_climate_scenario_knu`` holds its baseline's events:
-a design calibrated on the baseline has seen every footprint of it, and its
-rows there show the cover under other frequencies, not on unseen events.
-With other frequencies it has another source token, so it is not compared,
-as other exposures or impact functions are not.
+a design calibrated on the baseline has seen every footprint of it. It has
+the baseline's source token (the token identifies the events, not their
+frequencies, exposures or impact functions), so an out-of-sample
+evaluation of a baseline design on it is compared, and raises on the
+events the design was calibrated on. :meth:`ScenarioSet.holdout` cuts the
+members of one source with the same blocks, so a design on the baseline's
+training side is out of sample on the scaled set's test side, which shows
+the cover under other frequencies on unseen events.
 """
 
 from __future__ import annotations
@@ -158,6 +164,7 @@ from ._mixture import (
     scenario_members,
     where,
 )
+from ._parts import aligned_sides
 from .calibrate import CalibrationOptions, CalibrationResult, DesignSample, calibrate
 from .constraints import Budget
 from .cover import IndexDefinition, ParametricCover
@@ -167,7 +174,7 @@ from .index import ParametricIndex
 from .metrics import MetricOptions
 from .objectives import Objective
 from .pricing import Pricing, PurePremium
-from .sample import Basis, OutcomeSample, check_out_of_sample, holdout
+from .sample import Basis, OutcomeSample, check_no_leakage, check_out_of_sample, holdout
 from .units import InsuredUnits
 
 __all__ = [
@@ -478,9 +485,17 @@ class ScenarioSet:
 
         Each member is split by
         :func:`~climada_petals.engine.parametric.sample.holdout`, in the
-        order of the labels and members, with the same ``rng``. The two
-        sets have the labels of this one, and each scenario its members'
-        sides, so a mixture stays a mixture of its members' sides.
+        order of the labels and members, with the same ``rng``, except a
+        member with the source token of a member split before it: a set
+        scaled by ``apply_climate_scenario_knu`` and its baseline, say, hold
+        the same events. Such a member is cut with the blocks of the first
+        one's sides (on catalogue years, its years), so that each side holds
+        the same events in both, and a design on one side is out of sample
+        on the other side of every such member. Its frequencies are divided
+        by its own share on each side, and on year sets its years are
+        sampled from its side's events. The two sets have the labels of
+        this one, and each scenario its members' sides, so a mixture stays
+        a mixture of its members' sides.
 
         Parameters
         ----------
@@ -500,13 +515,23 @@ class ScenarioSet:
         ParametricInputError, LeakageError
             As :func:`~climada_petals.engine.parametric.sample.holdout`; the
             error's note names the scenario and the member.
+        ScenarioError
+            If a member with the source token of an earlier one can't be
+            cut with its blocks: other simulation years, other block labels,
+            or blocks that the earlier one doesn't hold.
         """
         sides: tuple[dict[str, list[OutcomeSample]], dict[str, list[OutcomeSample]]]
         sides = ({}, {})
+        cut: dict[str | None, tuple[OutcomeSample, OutcomeSample]] = {}
         for label, group in self.members.items():
             for position, member in enumerate(group):
                 try:
-                    pair = holdout(member, train_fraction=train_fraction, rng=rng)
+                    if member.source in cut:
+                        pair = aligned_sides(member, cut[member.source], rng)
+                        check_no_leakage(*pair)
+                    else:
+                        pair = holdout(member, train_fraction=train_fraction, rng=rng)
+                        cut[member.source] = pair
                 except ParametricError as error:
                     error.add_note(
                         "raised by ScenarioSet.holdout at "

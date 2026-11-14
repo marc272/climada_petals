@@ -144,8 +144,9 @@ token
 the whole sample the design sample was cut from, another part of it (by
 :func:`~climada_petals.engine.parametric.sample.holdout`,
 :func:`~climada_petals.engine.parametric.sample.year_block_kfold`,
-``select`` or ``unit``), or the same events built again. A shared event
-or block raises
+``select`` or ``unit``), or the same events built again, also with other
+frequencies, exposures or impact-function draws, such as a set scaled by
+``apply_climate_scenario_knu``. A shared event or block raises
 :class:`~climada_petals.engine.parametric.errors.LeakageError`. So the
 label "out of sample" is always checked. A sample of another source, such
 as another hazard set, is not compared, because its event ids and years

@@ -27,7 +27,8 @@ and the source token that every part keeps.
 module builds the parts. A part is the sample with some of its fields
 replaced (``dataclasses.replace``), so it keeps the others: the units, the
 draws, the label, the events left out, and the **source token**
-(:func:`source_token`), the fingerprint of the whole sample it was cut from.
+(:func:`source_token`), the fingerprint of the event set of the whole
+sample it was cut from.
 
 * :func:`year_part` takes the events of some catalogue years, over those
   years; :func:`cuts` finds contiguous cuts of the years that keep every
@@ -38,6 +39,9 @@ draws, the label, the events left out, and the **source token**
 * :func:`train_test` and :func:`kfold_pairs` return the sides of
   :func:`~climada_petals.engine.parametric.sample.holdout` and
   :func:`~climada_petals.engine.parametric.sample.year_block_kfold`.
+* :func:`aligned_sides` cuts a sample with the blocks of another sample's
+  sides, for samples of one event set, such as a baseline and a set scaled
+  by ``apply_climate_scenario_knu``.
 * :func:`unit_part` takes one insured unit's column, with every event.
 """
 
@@ -58,7 +62,7 @@ from climada_petals.util.config import LOGGER
 
 from ._draws import take_events
 from .annual import YearSets, sample_years
-from .errors import LeakageError, ParametricInputError
+from .errors import LeakageError, ParametricInputError, ScenarioError
 from .index import ParametricIndex
 from .measure import CATALOGUE
 from .units import InsuredUnits
@@ -67,6 +71,7 @@ __all__ = [
     "SPLITS",
     "Part",
     "SplitRecord",
+    "aligned_sides",
     "catalogue_years",
     "check_rng",
     "cuts",
@@ -124,54 +129,34 @@ class Part(NamedTuple):
         return SplitRecord(self.method, self.side, self.fold, self.n_folds, share)
 
 
-def _digest_arrays(digest: Any, parts: Sequence[tuple[Any, Any]]) -> None:
-    """Feed each array to ``digest`` as ``dtype``, its length first."""
-    for values, dtype in parts:
-        data = np.ascontiguousarray(values, dtype=dtype)
-        digest.update(np.int64(data.size).tobytes())
-        digest.update(data.tobytes())
-
-
-def source_token(
-    index: ParametricIndex, frequency: NDArray[np.float64], loss: Any, n_draws: int
-) -> str:
-    """Return the fingerprint of a sample's events: ``"sha256:<hex>"``.
+def source_token(index: ParametricIndex) -> str:
+    """Return the fingerprint of an event set: ``"sha256:<hex>"``.
 
     The SHA-256 of the unit ids and, in the order of the event ids, of the
-    events' ids, frequencies, index values and losses per draw. The basis,
-    the label and the records are left out: two samples of the same index
-    and ``Impact`` have one token on any basis, and two of other hazard
-    sets, frequencies, exposures or impact functions have two.
+    events' ids and index values. The frequencies, the losses, the draws,
+    the basis, the label and the records are left out, so a sample of the
+    same events with other frequencies (a set scaled by
+    ``apply_climate_scenario_knu``), other exposures or impact-function
+    draws has the same token, while another hazard set, whose index values
+    differ even where its event ids coincide, has another. An index that
+    other exposures change, such as one weighted by the values of each
+    scenario's own units, gives another token.
 
     Parameters
     ----------
     index : ParametricIndex
-        The sample's index.
-    frequency : numpy.ndarray of float
-        Each event's frequency per year.
-    loss : scipy.sparse.csr_matrix
-        The loss per row and unit, rows ordered by draw, then event.
-    n_draws : int
-        Draws per event.
+        The index of the events, e.g. the one given to
+        ``OutcomeSample.from_impact``, before events are left out.
     """
     order = np.argsort(index.event_id, kind="stable")
-    rows = (np.arange(n_draws)[:, None] * order.size + order[None, :]).reshape(-1)
-    matrix = loss[rows].tocsr(copy=True)
-    matrix.eliminate_zeros()
-    matrix.sort_indices()
     digest = hashlib.sha256(repr(tuple(index.unit_id)).encode())
-    _digest_arrays(
-        digest,
-        [
-            (matrix.shape, np.int64),
-            (index.event_id[order], np.int64),
-            (frequency[order], np.float64),
-            (index.values[order], np.float64),
-            (matrix.indptr, np.int64),
-            (matrix.indices, np.int64),
-            (matrix.data, np.float64),
-        ],
-    )
+    for values, dtype in (
+        (index.event_id[order], np.int64),
+        (index.values[order], np.float64),
+    ):
+        data = np.ascontiguousarray(values, dtype=dtype)
+        digest.update(np.int64(data.size).tobytes())
+        digest.update(data.tobytes())
     return f"sha256:{digest.hexdigest()}"
 
 
@@ -455,6 +440,90 @@ def kfold_pairs(sample: Any, folds: int, rng: Any) -> list[tuple[Any, Any]]:
             )
         )
     return pairs
+
+
+def aligned_sides(sample: Any, reference: tuple[Any, Any], rng: Any) -> tuple[Any, Any]:
+    """Return the holdout sides of ``sample`` with the blocks of a reference split.
+
+    ``reference`` is the training and the test side of another sample of
+    the same event set (the same source token), on the same route. On
+    catalogue years each side takes the reference side's years. On the
+    other routes each block goes to the side that holds it in the
+    reference, and the side's frequencies are divided by its share of the
+    sample's own frequency, so the sample keeps its ``lambda``; on year sets
+    the side's years are sampled from its events with ``rng``. So each side
+    holds the reference side's events, whatever the sample's frequencies.
+
+    Raises
+    ------
+    ScenarioError
+        If the sample can't be cut with the reference's blocks: other
+        simulation years, a block on neither side of the reference, or an
+        event or block on the other side of the reference.
+    ParametricInputError
+        If a side would hold no event or no frequency.
+    """
+    train, test = reference
+    if sample.route == CATALOGUE:
+        _check_years(sample, train, test)
+        sides = (
+            year_part(sample, np.asarray(train.years), Part("holdout", "train")),
+            year_part(sample, np.asarray(test.years), Part("holdout", "test")),
+        )
+    else:
+        on_train, on_test = _sides_of_blocks(sample, train, test)
+        sides = (
+            pool_part(sample, on_train, rng, Part("holdout", "train")),
+            pool_part(sample, on_test, rng, Part("holdout", "test")),
+        )
+    for one, other in ((train, sides[1]), (sides[0], test)):
+        events = np.intersect1d(one.event_id, other.event_id)
+        blocks = pd.Index(one.block).intersection(pd.Index(other.block))
+        if events.size or len(blocks):
+            raise ScenarioError(
+                "this sample has the source token of another sample of the set, but "
+                f"cut with that sample's blocks it puts {events.size} events and "
+                f"{len(blocks)} blocks on the other side of that sample's split: "
+                "their year or block labels differ"
+            )
+    return sides
+
+
+def _check_years(sample: Any, train: Any, test: Any) -> None:
+    """Raise unless a catalogue sample's years are a reference split's."""
+    years = np.sort(np.concatenate([train.years, test.years]))
+    own = catalogue_years(sample)
+    if not np.array_equal(own, years):
+        raise ScenarioError(
+            "this sample has the source token of another sample of the set, so "
+            f"they are cut with the same years, but its {own.size} simulation "
+            f"years, {own[0]} to {own[-1]}, are not that sample's {years.size}, "
+            f"{years[0]} to {years[-1]}"
+        )
+
+
+def _sides_of_blocks(
+    sample: Any, train: Any, test: Any
+) -> tuple[NDArray[np.bool_], NDArray[np.bool_]]:
+    """Return which events of ``sample`` have a block of a reference split's sides.
+
+    Raises
+    ------
+    ScenarioError
+        If a block of the sample is on neither side.
+    """
+    block = pd.Index(sample.block)
+    on_train = np.asarray(block.isin(pd.Index(train.block)))
+    on_test = np.asarray(block.isin(pd.Index(test.block)))
+    missing = block[~(on_train | on_test)]
+    if len(missing):
+        raise ScenarioError(
+            "this sample has the source token of another sample of the set, so "
+            f"they are cut with the same blocks, but {len(missing)} of its "
+            f"blocks, e.g. {list(missing[:5])}, are on neither side of that "
+            "sample's split"
+        )
+    return on_train, on_test
 
 
 def unit_part(sample: Any, unit_id: Hashable) -> Any:
