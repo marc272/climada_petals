@@ -136,7 +136,7 @@ def _simulation_years(
     n_years: int | None,
     first_year: int | None,
 ) -> tuple[NDArray[np.int64], NDArray[np.int64]]:
-    """Return each event's year and all years (module docstring).
+    """Return each event's year and all years (``with_years``).
 
     Raises
     ------
@@ -158,7 +158,7 @@ def _simulation_years(
         raise ParametricInputError("the hazard has no events")
     count, count_source = _year_count(frequency, n_years)
     # The event-name route is new and never guesses; the date and array
-    # routes keep their earlier result, with a warning (module docstring).
+    # routes keep their earlier result, with a warning (``with_years``).
     strict = isinstance(event_year, str) and event_year == "event_name"
     first = _first_year(rows, count, first_year, source, count_source, strict=strict)
     LOGGER.info(
@@ -176,7 +176,7 @@ def _event_years(
     event_year: ArrayLike | YearSource | None,
     n_events: int,
 ) -> tuple[NDArray[np.int64], str]:
-    """Return each event's year and where it was read (module docstring).
+    """Return each event's year and where it was read (``with_years``).
 
     Raises
     ------
@@ -284,7 +284,7 @@ def _first_year(
     *,
     strict: bool,
 ) -> int:
-    """Return the first simulation year (module docstring).
+    """Return the first simulation year (``with_years``).
 
     Without ``first_year``, the first event's year if the event years run
     over exactly ``count`` years. If they run over fewer, the first event's

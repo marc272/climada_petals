@@ -768,8 +768,8 @@ def split_years(
     ``floor(train_fraction * N)`` years of :attr:`ParametricIndex.years`,
     testing the rest. All the events of a year stay in the same block.
     The split reads only :attr:`ParametricIndex.years`, the simulation span
-    the index was built with (module docstring, "Simulation years"),
-    including the years without events; it never reads dates.
+    that :meth:`ParametricIndex.with_years` attached, including the years
+    without events; it never reads dates.
 
     Parameters
     ----------

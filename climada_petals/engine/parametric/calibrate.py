@@ -349,8 +349,9 @@ def loss_matrix(index: ParametricIndex, impact: Any) -> NDArray[np.float64]:
     Parameters
     ----------
     index : ParametricIndex
-        The index, with its :class:`~climada_petals.engine.parametric.units.InsuredUnits`
-        and its simulation years (``with_years``).
+        The index, with its insured units
+        (:class:`~climada_petals.engine.parametric.units.InsuredUnits`) and
+        its simulation years (``with_years``).
     impact : climada.engine.Impact
         Computed with ``save_mat=True`` on the units' exposure points, for
         the index's events in any order, e.g. ``ImpactCalc(exposures,
