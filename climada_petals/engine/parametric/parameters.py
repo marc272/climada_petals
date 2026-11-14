@@ -222,7 +222,7 @@ class Free:
 
 
 Parameter = float | Free
-"""A parameter of a payout: a fixed number, or :class:`Free`."""
+"""A parameter of a payout, a fixed number or a :class:`Free`."""
 
 
 def _grid(grid: object, lower: float, upper: float | None) -> tuple[float, ...] | None:

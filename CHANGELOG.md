@@ -12,6 +12,7 @@ Code freeze date: YYYY-MM-DD
 
 ### Added
 - Module to compute Earthquakes in MMI scale from ISC-GEM catalogue. [#201](https://github.com/CLIMADA-project/climada_petals/pull/201)
+- Module `climada_petals.engine.parametric` to design, evaluate and compare parametric insurance covers on CLIMADA objects: covers with step, linear, piecewise linear, binary or user-defined payout functions; insured units and an index from any hazard; outcomes on the event basis or on simulated years, with splits that keep design and evaluation events apart and record each sample's lineage; metrics of any cover, with its payouts and uncovered losses as `Impact`; calibration to the mean squared error, the expected uncovered loss or a weighted CVaR (linear programs with scipy's HiGHS, `SLSQP`, grids, ranges and a budget frontier); basis-risk diagnostics and impact function draws; scenario sets; insured units from the subareas of `cat_bonds`; and integration tests on the Data API.
 
 ### Changed
 

@@ -572,10 +572,10 @@ class ScenarioSet:
         ----------
         members : mapping of str to (ParametricIndex, Impact) or a sequence of them
             Each label to the index and the loss of its hazard set, as
-            :meth:`OutcomeSample.from_impact` takes them, or to several such
-            pairs, which form one scenario (module docstring). The index is
-            on the cover's definition, e.g. from
-            :meth:`ParametricIndex.from_definition`.
+            :meth:`~climada_petals.engine.parametric.sample.OutcomeSample.from_impact` takes
+            them, or to several such pairs, which form one scenario (module
+            docstring). The index is on the cover's definition, e.g. from
+            :meth:`~climada_petals.engine.parametric.index.ParametricIndex.from_definition`.
         units : InsuredUnits or mapping of str to InsuredUnits
             The insured units, or each label's units, for scenarios with
             other exposures.
@@ -593,7 +593,8 @@ class ScenarioSet:
         ------
         ParametricInputError
             If a member is not a pair of an index and an impact, a mapping
-            lacks a label, or as :meth:`OutcomeSample.from_impact` (the
+            lacks a label, or as
+            :meth:`~climada_petals.engine.parametric.sample.OutcomeSample.from_impact` (the
             error's note names the scenario and the member).
         ScenarioError
             As the class.
@@ -625,7 +626,8 @@ class ScenarioSet:
         loss, ``ImpactCalc(units.exposures, impact_funcs,
         hazard).impact(save_mat=True)``, on a copy of the exposures; and the
         sample, ``OutcomeSample.from_impact(index, impact, units=units,
-        basis=basis)``.
+        basis=basis)``. Each error from a hazard set has a note naming the
+        scenario and the member.
 
         Parameters
         ----------
@@ -665,16 +667,13 @@ class ScenarioSet:
         ParametricInputError
             If a member is not a ``Hazard``, a mapping lacks a label,
             ``index_units`` has other unit ids, or as
-            :meth:`ParametricIndex.from_definition` and
-            :meth:`OutcomeSample.from_impact`.
+            :meth:`~climada_petals.engine.parametric.index.ParametricIndex.from_definition` and
+            :meth:`~climada_petals.engine.parametric.sample.OutcomeSample.from_impact`.
         YearRouteError
             If the basis doesn't fit a hazard set, e.g. catalogue years on a
             frequency-scaled set.
         ScenarioError
             As the class.
-
-        Each error from a hazard set has a note naming the scenario and the
-        member.
 
         Examples
         --------
@@ -787,7 +786,8 @@ def evaluate_scenarios(
     the label in the ``scenario`` column. The cover is the same on every
     scenario: a design keeps its design premium, the contract price, in
     ``premium``, and ``premium_repriced`` prices its payouts on each
-    scenario. The table ranks nothing and names no scenario as best.
+    scenario. The table ranks nothing and names no scenario as best. Each
+    error from a scenario has a note naming it.
 
     Parameters
     ----------
@@ -818,8 +818,6 @@ def evaluate_scenarios(
         If an out-of-sample evaluation of a design meets a sample, or a
         member of a mixture, of the design sample's source that shares an
         event or a block with it (module docstring).
-
-    Each error from a scenario has a note naming it.
 
     Examples
     --------

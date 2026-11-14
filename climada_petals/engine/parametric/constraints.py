@@ -391,7 +391,7 @@ def fill_amounts(
 class UnitAmounts(NamedTuple):
     """The amounts of one unit of a template, on a design sample.
 
-    Attributes
+    Parameters
     ----------
     unit_id : str or int
         The unit.

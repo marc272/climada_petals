@@ -423,7 +423,8 @@ class MixtureYears(YearSets):
     ) -> OutcomeMeasure:
         """Return the measure of the given events over the years, with their weights.
 
-        As :meth:`YearSets.measure`, with ``year_weight`` in place of
+        As :meth:`~climada_petals.engine.parametric.annual.YearSets.measure`, with
+        ``year_weight`` in place of
         ``1 / N``.
 
         Raises
@@ -524,7 +525,8 @@ class MixtureCatalogue(CatalogueYears):
     ) -> OutcomeMeasure:
         """Return the measure of the given events over the years, with their weights.
 
-        As :meth:`CatalogueYears.measure`, with ``year_weight`` in place of
+        As :meth:`~climada_petals.engine.parametric.annual.CatalogueYears.measure`, with
+        ``year_weight`` in place of
         ``1 / N``; on a part of the years (a side of a split), their weights
         divided by their sum.
 

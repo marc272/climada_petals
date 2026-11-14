@@ -138,7 +138,7 @@ _JOINT: Final[str] = "joint"
 class UnitGrid(NamedTuple):
     """The grid of one unit's design problem.
 
-    Attributes
+    Parameters
     ----------
     position : int
         The unit's column in the sample.
@@ -335,7 +335,7 @@ def grid_paid_at_zero(grid: UnitGrid, cap: float | None) -> float:
 class UnitData(NamedTuple):
     """One unit's design problem on the design sample.
 
-    Attributes
+    Parameters
     ----------
     values : numpy.ndarray
         The unit's index per row of the sample.
@@ -390,7 +390,7 @@ class UnitData(NamedTuple):
 class GridSolved(NamedTuple):
     """A design problem solved on a grid.
 
-    Attributes
+    Parameters
     ----------
     problem : DesignProblem
         The chosen candidate's design problem (no amounts on the numpy grid).

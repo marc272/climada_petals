@@ -393,7 +393,8 @@ class CatalogueYears:
             The events a sample keeps (module docstring).
         frequency : array_like of float
             Each event's frequency per year: ``1 / N`` within
-            :data:`FREQUENCY_ATOL` relative to ``1``.
+            :data:`~climada_petals.engine.parametric.measure.FREQUENCY_ATOL` relative to
+            ``1``.
         n_draws : int, default 1
             Draws per event; rows are ordered by draw, then event.
         years : array_like of int, optional

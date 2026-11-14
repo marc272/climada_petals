@@ -29,3 +29,4 @@
 * Jere Lehtomaa
 * Valentin Gebhard
 * Dahyann Araya
+* Marc Prinzing

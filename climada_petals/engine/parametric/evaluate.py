@@ -571,7 +571,8 @@ def evaluate(
     Returns
     -------
     pandas.DataFrame
-        One row per subject: :data:`SETUP_COLUMNS`, then
+        One row per subject:
+        :data:`~climada_petals.engine.parametric.metrics.SETUP_COLUMNS`, then
         ``options.columns()``. Metrics are float, NaN where null.
 
     Raises

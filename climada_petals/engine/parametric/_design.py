@@ -109,7 +109,7 @@ class Setup(NamedTuple):
 class DesignUnits(NamedTuple):
     """The template's units on the design sample, by position in the sample.
 
-    Attributes
+    Parameters
     ----------
     exact : dict of int to UnitAmounts
         The units of the exact route.
@@ -127,7 +127,7 @@ class DesignUnits(NamedTuple):
 class Solved(NamedTuple):
     """A solved design problem.
 
-    Attributes
+    Parameters
     ----------
     problem : DesignProblem
         Its data.

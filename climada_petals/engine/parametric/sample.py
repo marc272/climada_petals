@@ -171,7 +171,7 @@ __all__ = [
 ]
 
 Basis = EventBasis | CatalogueYears | YearSets
-"""What an outcome is: an ``EventBasis``, ``CatalogueYears`` or ``YearSets``."""
+"""A basis, ``EventBasis``, ``CatalogueYears`` or ``YearSets``, which says what an outcome is."""
 
 
 @dataclass(frozen=True, eq=False)

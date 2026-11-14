@@ -46,6 +46,15 @@ such as ``beta = 0.99`` with 10,000 years lies exactly on a step of the
 distribution. The exceedance weight is then compared with ``1 - beta``
 within :data:`CDF_ATOL`, which gives the exact-arithmetic VaR, the lower
 atom, whatever the summation order.
+
+References
+----------
+* Rockafellar, R. T. and Uryasev, S. (2002). Conditional value-at-risk for
+  general loss distributions. Journal of Banking & Finance, 26(7),
+  1443-1471. https://doi.org/10.1016/S0378-4266(02)00271-6
+* Rockafellar, R. T. and Uryasev, S. (2000). Optimization of conditional
+  value-at-risk. Journal of Risk, 2(3), 21-41.
+  https://doi.org/10.21314/JOR.2000.038
 """
 
 from __future__ import annotations

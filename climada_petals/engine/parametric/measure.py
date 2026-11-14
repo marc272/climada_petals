@@ -153,13 +153,13 @@ __all__ = [
 ]
 
 EVENT: Final[str] = "event"
-"""The event basis: one outcome per event, weighted by its frequency."""
+"""The event basis, with one outcome per event, weighted by its frequency."""
 
 ANNUAL: Final[str] = "annual"
-"""The annual basis: one outcome per simulated year."""
+"""The annual basis, with one outcome per simulated year."""
 
 FREQUENCY: Final[str] = "frequency"
-"""The route of the event basis: the events' frequencies are the weights."""
+"""The route of the event basis, on which the events' frequencies are the weights."""
 
 CATALOGUE: Final[str] = "catalogue"
 """The annual route of :class:`~climada_petals.engine.parametric.annual.CatalogueYears`."""
@@ -175,7 +175,7 @@ PROBABILITY_ATOL: Final[float] = 1e-9
 """Absolute tolerance for weights summing to one."""
 
 FREQUENCY_ATOL: Final[float] = 1e-6
-"""Catalogue years: the largest ``|frequency x N - 1|`` on a kept event."""
+"""The largest ``|frequency x N - 1|`` on an event kept on catalogue years."""
 
 ENSEMBLE_PARENT: Final[str] = r"(?P<block>.+?)(?:_gen[0-9]+)?"
 """Pattern of :func:`labels_from_names` for the members of perturbed tracks.
@@ -267,7 +267,7 @@ class OutcomeMeasure:
 
     @property
     def total_weight(self) -> float:
-        """Sum of the weights: 1 on the annual basis, ``sum f`` on the event basis."""
+        """The sum of the weights, 1 on the annual basis and ``sum f`` on the event basis."""
         return float(self.weights.sum())
 
     @cached_property

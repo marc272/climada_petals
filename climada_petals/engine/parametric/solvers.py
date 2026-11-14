@@ -110,6 +110,12 @@ range is at most half its wide one, or narrower than ``1e-7`` of the scale
 every identified amount is pinned. ``Solution.ranges`` holds the wide
 ranges, in loss units. An optimal set narrower than about ``1e-9 / s`` is
 reported as unique.
+
+References
+----------
+* Rockafellar, R. T. and Uryasev, S. (2000). Optimization of conditional
+  value-at-risk. Journal of Risk, 2(3), 21-41.
+  https://doi.org/10.21314/JOR.2000.038
 """
 
 from __future__ import annotations
@@ -759,7 +765,7 @@ def solve_design(
 class Settings:
     """What the design problems read of ``CalibrationOptions``.
 
-    Attributes
+    Parameters
     ----------
     fill : {"lowest", "highest"}
         The fill rule of unidentified amounts.

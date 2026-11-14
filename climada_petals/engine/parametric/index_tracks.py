@@ -23,8 +23,8 @@ Cat-in-a-circle index from tropical cyclone tracks, and its track geometry.
 builds: the highest Saffir-Simpson category that a storm's track reaches
 within ``radius_km`` of an insured unit. It reads the tracks, not the wind
 field that drives the loss, so index and loss are decoupled as in a real
-contract. Steinmann et al. (2023, Environment Systems and Decisions
-43:555-568) build such products in CLIMADA, with radii of 10 to 50 km.
+contract. Steinmann et al. (2023) build such products in CLIMADA, with
+radii of 10 to 50 km.
 
 Cat-in-a-circle, per storm and exposure point:
 
@@ -46,6 +46,13 @@ The default breakpoints, :data:`SAFFIR_SIMPSON_KN`, are the NHC lower bounds
 of categories 1 to 5 in knots of 1-minute sustained wind, the values of
 ``climada.hazard.tc_tracks.SAFFIR_SIM_CAT[1:6]``. Category 0 covers tropical
 storms, depressions and storms that never enter the circle.
+
+References
+----------
+* Steinmann, C. B., Guillod, B. P., Fairless, C. and Bresch, D. N. (2023).
+  A generalized framework for designing open-source natural hazard
+  parametric insurance. Environment Systems and Decisions, 43(4), 555-568.
+  https://doi.org/10.1007/s10669-023-09934-x
 """
 
 from __future__ import annotations
@@ -81,7 +88,8 @@ __all__ = [
 ]
 
 CAT_IN_CIRCLE: Final[str] = "cat_in_circle"
-"""The ``kind`` of a cat-in-a-circle :class:`IndexDefinition`."""
+"""The ``kind`` of a cat-in-a-circle
+:class:`~climada_petals.engine.parametric.cover.IndexDefinition`."""
 
 SAFFIR_SIMPSON_KN: Final[tuple[float, ...]] = (64.0, 83.0, 96.0, 113.0, 137.0)
 """Lower bounds of Saffir-Simpson categories 1-5, 1-minute sustained wind, kn."""

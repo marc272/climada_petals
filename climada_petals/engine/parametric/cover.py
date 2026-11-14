@@ -465,7 +465,14 @@ class ParametricCover:
         )
 
     def check_resolved(self) -> None:
-        """Raise :class:`UnresolvedParameterError` if the cover is a template."""
+        """Raise if the cover is a template.
+
+        Raises
+        ------
+        UnresolvedParameterError
+            If a parameter is free, or the limit is a rule such as
+            ``Limit.largest_loss()``.
+        """
         free = self.free_parameters()
         if free:
             raise UnresolvedParameterError(

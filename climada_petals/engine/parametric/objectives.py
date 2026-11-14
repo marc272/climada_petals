@@ -64,6 +64,15 @@ weighted-CVaR objective is ``(alpha / (1 - beta) + 1 - alpha) * E[U]``: it has
 the same minimisers as ``E[U]``.
 :func:`~climada_petals.engine.parametric.calibrate.calibrate` records this
 case as ``degenerate_tail="expected_uncovered"`` and logs a warning.
+
+References
+----------
+* Rockafellar, R. T. and Uryasev, S. (2000). Optimization of conditional
+  value-at-risk. Journal of Risk, 2(3), 21-41.
+  https://doi.org/10.21314/JOR.2000.038
+* Rockafellar, R. T. and Uryasev, S. (2002). Conditional value-at-risk for
+  general loss distributions. Journal of Banking & Finance, 26(7),
+  1443-1471. https://doi.org/10.1016/S0378-4266(02)00271-6
 """
 
 from __future__ import annotations

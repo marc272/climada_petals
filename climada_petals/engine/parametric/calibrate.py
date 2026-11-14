@@ -211,7 +211,9 @@ JOINT: Final[str] = "joint"
 """The joint scope, and the ``problem_id`` of its single design problem."""
 
 DEGENERATE_TAILS: Final[tuple[str, ...]] = ("expected_uncovered", "single_outcome")
-"""The values of :attr:`CoverProblem.degenerate_tail`, besides None."""
+"""The values of
+:attr:`~climada_petals.engine.parametric._problem.CoverProblem.degenerate_tail`,
+besides None."""
 
 
 @dataclass(frozen=True, kw_only=True)
@@ -318,12 +320,13 @@ class CalibrationOptions:
 class CalibrationResult:
     """A design: the resolved cover and how it was found.
 
-    Attributes
+    Parameters
     ----------
     cover : ParametricCover
         The resolved cover: the template with every free parameter set and
         ``Limit.largest_loss()`` written as numbers. It pays by its own
-        terms on any sample (:meth:`ParametricCover.payout_matrix`).
+        terms on any sample
+        (:meth:`~climada_petals.engine.parametric.cover.ParametricCover.payout_matrix`).
     template_hash : str
         ``definition_hash`` of the template.
     objective : MSE, ExpectedUncovered, WeightedCVaR or UserObjective
@@ -773,9 +776,11 @@ def calibrate(
     Returns
     -------
     CalibrationResult
-        The resolved cover, one :class:`CoverProblem` per design problem,
-        the unidentified amounts, the ranges and the grid's profile where
-        there are, the design sample's record and its index diagnostics.
+        The resolved cover, one
+        :class:`~climada_petals.engine.parametric._problem.CoverProblem`
+        per design problem, the unidentified amounts, the ranges and the
+        grid's profile where there are, the design sample's record and its
+        index diagnostics.
 
     Raises
     ------
@@ -790,11 +795,14 @@ def calibrate(
         If a fixed amount is above its unit's limit.
     CalibrationError
         If a design problem is not solved to optimality, or its solution
-        fails a check: :class:`InfeasibleCalibrationError` (on a grid: no
-        feasible candidate), :class:`UnboundedCalibrationError`,
-        :class:`CalibrationLimitError` (``time_limit``,
-        ``max_slsqp_amounts``, ``max_cut_rounds``, ``max_grid_points`` or a
-        solver's iteration limit) or the base class. No problem is skipped.
+        fails a check:
+        :class:`~climada_petals.engine.parametric.errors.InfeasibleCalibrationError`
+        (on a grid: no feasible candidate),
+        :class:`~climada_petals.engine.parametric.errors.UnboundedCalibrationError`,
+        :class:`~climada_petals.engine.parametric.errors.CalibrationLimitError`
+        (``time_limit``, ``max_slsqp_amounts``, ``max_cut_rounds``,
+        ``max_grid_points`` or a solver's iteration limit) or the base class.
+        No problem is skipped.
 
     Examples
     --------

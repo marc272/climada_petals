@@ -109,7 +109,7 @@ _HIGHS_INFEASIBLE: Final[int] = 2
 class QPLimits(NamedTuple):
     """The stated limits of the mean squared error's route.
 
-    Attributes
+    Parameters
     ----------
     max_slsqp_amounts : int, default 1_000
         The most amounts ``SLSQP`` solves for in one design problem.
