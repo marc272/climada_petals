@@ -470,7 +470,8 @@ def register_payout(cls: type[_P]) -> type[_P]:
     CoverDefinitionError
         If ``cls`` is not a concrete subclass of :class:`PayoutFunction`,
         its ``kind`` is not a non-empty string, or another class is
-        registered under its ``kind``. Registering a class again is allowed.
+        registered under its ``kind``. Registering a class again, or a new
+        definition of it, as a notebook cell run twice makes, replaces it.
     """
     if not (inspect.isclass(cls) and issubclass(cls, PayoutFunction)) or (
         inspect.isabstract(cls)
@@ -484,12 +485,17 @@ def register_payout(cls: type[_P]) -> type[_P]:
             f"{cls.__qualname__}.kind must be a non-empty string, got {kind!r}"
         )
     known = _REGISTRY.get(kind)
-    if known is not None and known is not cls:
+    if known is not None and _name(known) != _name(cls):
         raise CoverDefinitionError(
-            f"payout kind {kind!r} is registered for {known.__qualname__}"
+            f"payout kind {kind!r} is registered for {_name(known)}"
         )
     _REGISTRY[kind] = cls
     return cls
+
+
+def _name(cls: type) -> str:
+    """Return a class's module and qualified name."""
+    return f"{cls.__module__}.{cls.__qualname__}"
 
 
 def payout_from_dict(document: Mapping[str, Any]) -> PayoutFunction:

@@ -46,6 +46,7 @@ import math
 import os
 from collections.abc import Hashable, Mapping, Sequence
 from dataclasses import dataclass, field, replace
+from functools import partial
 from pathlib import Path
 from types import MappingProxyType
 from typing import TYPE_CHECKING, Any, Final
@@ -159,6 +160,11 @@ class IndexDefinition:
         """Hash the document, since ``parameters`` is a read-only mapping."""
         return hash(_canonical(self.to_dict()))
 
+    def __reduce__(self) -> tuple[Any, ...]:
+        """Pickle and copy through the constructor and the document's values."""
+        fields = self.to_dict()
+        return (partial(type(self), **fields), ())
+
     def to_dict(self) -> dict[str, Any]:
         """Return the index definition's document, every field included."""
         return {
@@ -257,6 +263,12 @@ class Limit:
         if isinstance(self.amount, Mapping):
             return hash(frozenset(self.amount.items()))
         return hash((self.amount, self.rule))
+
+    def __reduce__(self) -> tuple[Any, ...]:
+        """Pickle and copy through the constructor."""
+        if isinstance(self.amount, Mapping):
+            return (type(self), (dict(self.amount),))
+        return (partial(type(self), self.amount, rule=self.rule), ())
 
     @classmethod
     def largest_loss(cls) -> Limit:
@@ -365,6 +377,7 @@ class ParametricCover:
     A template with five free levels on a wind index, and the same cover
     resolved by hand:
 
+    >>> from climada_petals.engine.parametric import StepPayout
     >>> wind = IndexDefinition("hazard", unit="m/s", index_stat="max")
     >>> template = ParametricCover(
     ...     wind,
@@ -413,6 +426,17 @@ class ParametricCover:
     def __hash__(self) -> int:
         """Hash the document, label included."""
         return hash(_canonical(self.to_dict()))
+
+    def __reduce__(self) -> tuple[Any, ...]:
+        """Pickle and copy through the constructor, with the payouts as a dict."""
+        rebuild = partial(
+            type(self),
+            unit_id=self.unit_id,
+            payout_unit=self.payout_unit,
+            limit=self.limit,
+            label=self.label,
+        )
+        return (rebuild, (self.index, dict(self.payout)))
 
     @property
     def n_units(self) -> int:

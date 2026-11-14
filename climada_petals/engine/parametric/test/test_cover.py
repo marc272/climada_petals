@@ -24,6 +24,7 @@ import copy
 import hashlib
 import json
 import math
+import pickle
 import re
 import tempfile
 import unittest
@@ -467,6 +468,22 @@ class TestDocuments(unittest.TestCase):
                     self.assertEqual(again.unit_id, (3, 1))
                     self.assertEqual(hash(again), hash(cover))
         self.assertNotEqual(cover, cover.to_dict())
+
+    def test_covers_pickle_and_copy(self) -> None:
+        covers = [
+            _cover(limit=Limit({"u1": 3e3, "u2": 1e3}), label="stated"),
+            ParametricCover.from_dict(TEMPLATE_DOCUMENT),
+            replace(
+                _cover(limit=Limit(5e3)),
+                index=IndexDefinition("hazard", unit="m/s", parameters={"r": [1]}),
+            ),
+        ]
+        for cover in covers:
+            with self.subTest(cover=cover.label):
+                for again in (pickle.loads(pickle.dumps(cover)), copy.deepcopy(cover)):
+                    self.assertEqual(again, cover)
+                    self.assertEqual(again.limit, cover.limit)
+                    self.assertEqual(again.index, cover.index)
 
     def test_invalid_documents_raise(self) -> None:
         document = copy.deepcopy(TEMPLATE_DOCUMENT)

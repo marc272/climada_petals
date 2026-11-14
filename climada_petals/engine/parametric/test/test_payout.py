@@ -511,6 +511,22 @@ class TestUserDefined(unittest.TestCase):
             ):
                 call()
 
+    def test_a_new_definition_of_a_class_replaces_it(self) -> None:
+        def define() -> type[PayoutFunction]:
+            @dataclass(frozen=True)
+            class Redefined(_QuadraticPayout):
+                kind: ClassVar[str] = "test_redefined"
+
+            return Redefined
+
+        first, second = define(), define()
+        self.assertIsNot(first, second)
+        register_payout(first)
+        register_payout(second)
+        document = {"kind": "test_redefined", "attachment": 0.0, "exhaustion": 1.0}
+        payout = payout_from_dict({**document, "amount": 1.0})
+        self.assertIs(type(payout), second)
+
     def test_registration_errors(self) -> None:
         class Unnamed(_QuadraticPayout):
             kind: ClassVar[str] = ""
