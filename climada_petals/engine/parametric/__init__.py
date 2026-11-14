@@ -98,6 +98,15 @@ from CLIMADA's ``Hazard``, ``TCTracks``, ``Exposures`` and ``Impact``:
   Impact-function draws come second (:func:`impact_function_draws`,
   :meth:`OutcomeSample.from_impact_draws`): they widen the uncovered loss
   but don't change which events pay or lose.
+* **Scenarios:** :class:`ScenarioSet` maps labels to scenarios, other
+  hazard sets and possibly other exposures (a future climate from the Data
+  API, a set scaled by ``apply_climate_scenario_knu``), all on one route.
+  A label may hold several samples, which form one scenario as an
+  equal-weight mixture: the windows of a pathway or the members of an
+  ensemble. :func:`evaluate_scenarios` evaluates one cover on every
+  scenario, with the label in the ``scenario`` column, and
+  :func:`calibrate_per_scenario` designs one per scenario
+  (:func:`designs_table`). The tables rank no scenario and no cover.
 
 The module depends only on CLIMADA, numpy, scipy, pandas and matplotlib.
 """
@@ -125,6 +134,7 @@ from .errors import (
     MissingDependencyError,
     ParametricError,
     ParametricInputError,
+    ScenarioError,
     UnboundedCalibrationError,
     UnitMappingError,
     UnknownPayoutKindError,
@@ -156,6 +166,12 @@ from .sample import (
     check_no_leakage,
     holdout,
     year_block_kfold,
+)
+from .scenarios import (
+    ScenarioSet,
+    calibrate_per_scenario,
+    designs_table,
+    evaluate_scenarios,
 )
 from .units import InsuredUnits
 
@@ -198,6 +214,8 @@ __all__ = [
     "PayoutFunction",
     "PiecewiseLinearPayout",
     "PurePremium",
+    "ScenarioError",
+    "ScenarioSet",
     "SplitRecord",
     "StepPayout",
     "UnboundedCalibrationError",
@@ -210,9 +228,12 @@ __all__ = [
     "YearSets",
     "calibrate",
     "calibrate_frontier",
+    "calibrate_per_scenario",
     "check_no_leakage",
     "compare",
+    "designs_table",
     "evaluate",
+    "evaluate_scenarios",
     "holdout",
     "impact_function_draws",
     "index_diagnostics",
