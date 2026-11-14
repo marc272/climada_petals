@@ -855,9 +855,9 @@ def designs_table(designs: Mapping[str, CalibrationResult]) -> pd.DataFrame:
     ParametricInputError
         If ``designs`` is not a non-empty mapping of labels to designs.
     """
-    items = labelled_items(designs, "designs")
+    labelled = labelled_items(designs, "designs")
     frames = []
-    for label, result in items:
+    for label, result in labelled:
         if not isinstance(result, CalibrationResult):
             raise ParametricInputError(
                 f"designs[{label!r}] must be a CalibrationResult, got "

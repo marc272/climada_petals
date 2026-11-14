@@ -80,9 +80,9 @@ constraints on the amounts, with no auxiliary variables. scipy's public
 interface has no QP solver, so it is solved with
 :func:`scipy.optimize.minimize` and ``method="SLSQP"`` on the amounts, with
 the analytic gradient. Under a cost-of-capital load, the premium is held by
-cutting planes: each round adds the linear piece of the loaded premium at
-the round's solution, until the premium meets the budget within
-``feasibility_tolerance``. The route has stated limits (:class:`QPLimits`):
+cutting planes (Kelley, 1960), on the budget constraint alone: each round
+adds the linear piece of the loaded premium at the round's solution, until
+the premium meets the budget within ``feasibility_tolerance``. The route has stated limits (:class:`QPLimits`):
 ``max_slsqp_amounts`` amounts, ``max_cut_rounds`` rounds and the
 ``time_limit``; reaching one raises
 :class:`~climada_petals.engine.parametric.errors.CalibrationLimitError`,
@@ -113,6 +113,9 @@ reported as unique.
 
 References
 ----------
+* Kelley, J. E., Jr. (1960). The cutting-plane method for solving convex
+  programs. Journal of the Society for Industrial and Applied Mathematics,
+  8(4), 703-712. https://doi.org/10.1137/0108053
 * Rockafellar, R. T. and Uryasev, S. (2000). Optimization of conditional
   value-at-risk. Journal of Risk, 2(3), 21-41.
   https://doi.org/10.21314/JOR.2000.038
@@ -257,10 +260,10 @@ class _LinearProgram:
         self.rows.append(blocks)
         self.rhs.append(np.asarray(bound, dtype=np.float64))
 
-    def offset(self, var: int) -> slice:
+    def offset(self, block_id: int) -> slice:
         """Return the positions of a variable block in the solution vector."""
-        start = sum(self.sizes[:var])
-        return slice(start, start + self.sizes[var])
+        start = sum(self.sizes[:block_id])
+        return slice(start, start + self.sizes[block_id])
 
     def matrix(self) -> sp.csr_matrix:
         """Return the rows of every constraint as one sparse matrix."""
@@ -269,11 +272,11 @@ class _LinearProgram:
                 sp.hstack(
                     [
                         (
-                            sp.csr_matrix(block[var])
-                            if var in block
+                            sp.csr_matrix(block[block_id])
+                            if block_id in block
                             else sp.csr_matrix((len(bound), size))
                         )
-                        for var, size in enumerate(self.sizes)
+                        for block_id, size in enumerate(self.sizes)
                     ]
                 )
                 for block, bound in zip(self.rows, self.rhs, strict=True)

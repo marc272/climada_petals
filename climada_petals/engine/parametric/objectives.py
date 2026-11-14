@@ -146,7 +146,13 @@ class MSE:
         return float(measure.probability @ residual**2)
 
     def to_dict(self) -> dict[str, Any]:
-        """Return the objective's document, ``{"kind": "mse"}``."""
+        """Return the objective's document.
+
+        Returns
+        -------
+        dict
+            ``{"kind": "mse"}``.
+        """
         return {"kind": self.name}
 
 
@@ -178,7 +184,13 @@ class ExpectedUncovered:
         return float(measure.probability @ _outcome_uncovered(loss, payout, measure))
 
     def to_dict(self) -> dict[str, Any]:
-        """Return the objective's document, ``{"kind": "expected_uncovered"}``."""
+        """Return the objective's document.
+
+        Returns
+        -------
+        dict
+            ``{"kind": "expected_uncovered"}``.
+        """
         return {"kind": self.name}
 
 
@@ -244,7 +256,13 @@ class WeightedCVaR:
         return self.alpha * cvar + (1.0 - self.alpha) * expected
 
     def to_dict(self) -> dict[str, Any]:
-        """Return the objective's document, with ``alpha`` and ``beta``."""
+        """Return the objective's document, with ``alpha`` and ``beta``.
+
+        Returns
+        -------
+        dict
+            ``{"kind": "weighted_cvar", "alpha": ..., "beta": ...}``.
+        """
         return {"kind": self.name, "alpha": self.alpha, "beta": self.beta}
 
 
@@ -381,7 +399,14 @@ class UserObjective:
         return float(value)
 
     def to_dict(self) -> dict[str, Any]:
-        """Return the objective's document: ``kind``, ``name`` and ``parameters``."""
+        """Return the objective's document: ``kind``, ``name`` and ``parameters``.
+
+        Returns
+        -------
+        dict
+            ``{"kind": "user", "name": ..., "parameters": {...}}``; the
+            function itself is not written.
+        """
         return {
             "kind": self.kind,
             "name": self.name,

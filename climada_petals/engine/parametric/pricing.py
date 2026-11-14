@@ -82,7 +82,13 @@ class PurePremium:
         return measure.expectation(payout)
 
     def to_dict(self) -> dict[str, Any]:
-        """Return the pricing's document, ``{"kind": "pure"}``."""
+        """Return the pricing's document.
+
+        Returns
+        -------
+        dict
+            ``{"kind": "pure"}``.
+        """
         return {"kind": self.name}
 
 
@@ -143,7 +149,13 @@ class CostOfCapitalLoad:
         return (1.0 - self.rate) * expected + self.rate * cvar
 
     def to_dict(self) -> dict[str, Any]:
-        """Return the pricing's document, ``{"kind": "cost_of_capital", "q": ..., "rate": ...}``."""
+        """Return the pricing's document.
+
+        Returns
+        -------
+        dict
+            ``{"kind": "cost_of_capital", "q": ..., "rate": ...}``.
+        """
         return {"kind": self.name, "q": self.q, "rate": self.rate}
 
 

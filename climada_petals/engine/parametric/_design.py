@@ -199,7 +199,7 @@ def _solve_one(
     )
     grid = units.grids.get(positions[0])
     if grid is not None:
-        data = UnitData(
+        unit_inputs = UnitData(
             sample.index_values[:, grid.position],
             loss,
             sample.measure,
@@ -208,7 +208,7 @@ def _solve_one(
             setup.objective,
             setup.pricing,
         )
-        found = solve_grid(grid, data, setup.settings)
+        found = solve_grid(grid, unit_inputs, setup.settings)
         return Solved(found.problem, positions, found.solution, {}, found)
     members = [units.exact[position] for position in positions]
     problem = DesignProblem(
@@ -259,10 +259,11 @@ def resolved_design(
     """Return the template with every free parameter set and its limit resolved."""
     amounts: dict[Hashable, NDArray[np.float64]] = {}
     others: dict[Hashable, dict[str, float]] = {}
-    for item in solved:
-        amounts.update(item.amounts)
-        if item.grid is not None:
-            others[setup.sample.unit_id[item.positions[0]]] = item.grid.values
+    for solved_problem in solved:
+        amounts.update(solved_problem.amounts)
+        if solved_problem.grid is not None:
+            unit = setup.sample.unit_id[solved_problem.positions[0]]
+            others[unit] = solved_problem.grid.values
     return resolved_cover(
         setup.template, list(units.exact.values()), amounts, units.limit, others
     )
@@ -273,9 +274,10 @@ def unidentified(
 ) -> dict[Hashable, tuple[str, ...]]:
     """Return the unidentified amounts of every unit, in the sample's order."""
     found = {unit.unit_id: unit.unidentified_names for unit in units.exact.values()}
-    for item in solved:
-        if item.grid is not None:
-            found[unit_id[item.positions[0]]] = item.grid.unidentified
+    for solved_problem in solved:
+        if solved_problem.grid is not None:
+            unit = unit_id[solved_problem.positions[0]]
+            found[unit] = solved_problem.grid.unidentified
     return {unit: found[unit] for unit in unit_id}
 
 

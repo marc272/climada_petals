@@ -376,7 +376,19 @@ class DesignSample:
 
     @classmethod
     def from_sample(cls, sample: OutcomeSample) -> DesignSample:
-        """Return the record of a sample."""
+        """Return the record of a sample.
+
+        Parameters
+        ----------
+        sample : OutcomeSample
+            The design sample.
+
+        Returns
+        -------
+        DesignSample
+            Its setup, events, blocks, years, split, source token and the
+            parent storms of its events.
+        """
         return cls(
             basis=sample.kind,
             route=sample.route,

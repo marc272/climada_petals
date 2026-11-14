@@ -407,7 +407,14 @@ class AmountConstraints:
         return bool(np.all(self.lower <= self.upper))
 
     def with_monotone_rows(self) -> AmountConstraints:
-        """Return these bounds with the rows ``x_k - x_{k+1} <= 0``, and no other rows."""
+        """Return these bounds with the rows ``x_k - x_{k+1} <= 0``, and no other rows.
+
+        Returns
+        -------
+        AmountConstraints
+            The same bounds, with ``n - 1`` rows that keep the amounts
+            non-decreasing.
+        """
         count = self.lower.size
         rows = np.zeros((count - 1, count))
         position = np.arange(count - 1)
@@ -461,12 +468,12 @@ def constructor_fields(target: object) -> list[dataclasses.Field[Any]]:
             f"{target!r} is not a dataclass: override parameters, with_values, "
             "to_dict and from_dict"
         )
-    return [item for item in dataclasses.fields(target) if item.init]
+    return [field_def for field_def in dataclasses.fields(target) if field_def.init]
 
 
-def required_field(item: dataclasses.Field[Any]) -> bool:
+def required_field(field_def: dataclasses.Field[Any]) -> bool:
     """Return whether a dataclass field has no default."""
     return (
-        item.default is dataclasses.MISSING
-        and item.default_factory is dataclasses.MISSING
+        field_def.default is dataclasses.MISSING
+        and field_def.default_factory is dataclasses.MISSING
     )

@@ -487,13 +487,13 @@ class _Profile:
 
 
 def _unidentified(
-    payout: PayoutFunction, template: PayoutFunction, data: UnitData
+    payout: PayoutFunction, template: PayoutFunction, unit_inputs: UnitData
 ) -> tuple[str, ...]:
     """Return the template's free amounts that the resolved payout's basis never reaches."""
     if not isinstance(payout, LinearInAmounts):
         return ()
-    basis = sp.csr_matrix(payout.basis(data.values))
-    reached = np.asarray(abs(basis).T @ data.weighted).reshape(-1) > 0
+    basis = sp.csr_matrix(payout.basis(unit_inputs.values))
+    reached = np.asarray(abs(basis).T @ unit_inputs.weighted).reshape(-1) > 0
     parameters = template.parameters()
     return tuple(
         name
@@ -503,22 +503,29 @@ def _unidentified(
 
 
 def _numpy_status(
-    payout: PayoutFunction, paid: NDArray[np.float64], data: UnitData, tolerance: float
+    payout: PayoutFunction,
+    paid: NDArray[np.float64],
+    unit_inputs: UnitData,
+    tolerance: float,
 ) -> tuple[str, float]:
     """Return a numpy candidate's status and premium."""
-    premium = data.pricing.premium(paid, data.measure)
-    if data.cap is not None:
+    premium = unit_inputs.pricing.premium(paid, unit_inputs.measure)
+    if unit_inputs.cap is not None:
         above = (
-            not payout.amount_constraints(data.cap).bounds_feasible
+            not payout.amount_constraints(unit_inputs.cap).bounds_feasible
             if isinstance(payout, LinearInAmounts)
-            else float(paid.max(initial=0.0)) > data.cap
+            else float(paid.max(initial=0.0)) > unit_inputs.cap
         )
         if above:
             return STATUSES[3], premium
-    if data.bound is not None:
-        scale = data.problem(None, "").scale
-        reference = max(abs(data.bound), data.measure.expectation(data.loss), scale)
-        if premium > data.bound + tolerance * reference:
+    if unit_inputs.bound is not None:
+        scale = unit_inputs.problem(None, "").scale
+        reference = max(
+            abs(unit_inputs.bound),
+            unit_inputs.measure.expectation(unit_inputs.loss),
+            scale,
+        )
+        if premium > unit_inputs.bound + tolerance * reference:
             return STATUSES[2], premium
     return STATUSES[0], premium
 
@@ -542,17 +549,23 @@ def _evaluate(
     return paid
 
 
-def _solve_numpy(grid: UnitGrid, data: UnitData, settings: Settings) -> GridSolved:
+def _solve_numpy(
+    grid: UnitGrid, unit_inputs: UnitData, settings: Settings
+) -> GridSolved:
     """Evaluate every candidate of a numpy grid; return the chosen one."""
     start = time.perf_counter()
     profile = _Profile.empty(len(grid.candidates))
     for position, candidate in enumerate(grid.candidates):
         payout = grid.resolved(candidate)
-        paid = _evaluate(payout, data.values, grid.unit_id)
-        status, premium = _numpy_status(payout, paid, data, settings.tolerance)
-        value = data.objective.evaluate(data.loss, paid, data.measure)
+        paid = _evaluate(payout, unit_inputs.values, grid.unit_id)
+        status, premium = _numpy_status(payout, paid, unit_inputs, settings.tolerance)
+        value = unit_inputs.objective.evaluate(
+            unit_inputs.loss, paid, unit_inputs.measure
+        )
         profile.set(position, (status, value, premium))
-    chosen = profile.choose(settings.tolerance, data.reference(), str(grid.unit_id))
+    chosen = profile.choose(
+        settings.tolerance, unit_inputs.reference(), str(grid.unit_id)
+    )
     info = SolverInfo(
         route=GRID_ROUTE,
         solver="numpy",
@@ -564,12 +577,12 @@ def _solve_numpy(grid: UnitGrid, data: UnitData, settings: Settings) -> GridSolv
         seconds=time.perf_counter() - start,
     )
     return GridSolved(
-        data.problem(None, str(grid.unit_id)),
+        unit_inputs.problem(None, str(grid.unit_id)),
         Solution(
             np.zeros(0), float(profile.value[chosen]), info, unique=profile.ties == 0
         ),
         dict(zip(grid.names, grid.candidates[chosen])),
-        _unidentified(grid.resolved(grid.candidates[chosen]), grid.payout, data),
+        _unidentified(grid.resolved(grid.candidates[chosen]), grid.payout, unit_inputs),
         profile.ties,
         len(grid.candidates),
         profile.frame(grid),
@@ -577,40 +590,49 @@ def _solve_numpy(grid: UnitGrid, data: UnitData, settings: Settings) -> GridSolv
 
 
 def _shape_candidate(
-    grid: UnitGrid, candidate: tuple[float, ...], data: UnitData
+    grid: UnitGrid, candidate: tuple[float, ...], unit_inputs: UnitData
 ) -> tuple[UnitAmounts, DesignProblem]:
     """Return a shape candidate's amounts and design problem."""
     payout = cast(LinearInAmounts, grid.resolved(candidate))
-    unit = unit_amount(grid.unit_id, payout, data.values, data.weighted, data.cap)
-    return unit, data.problem(unit, str(grid.unit_id))
+    unit = unit_amount(
+        grid.unit_id, payout, unit_inputs.values, unit_inputs.weighted, unit_inputs.cap
+    )
+    return unit, unit_inputs.problem(unit, str(grid.unit_id))
 
 
 def _shape_value(
-    grid: UnitGrid, candidate: tuple[float, ...], data: UnitData, settings: Settings
+    grid: UnitGrid,
+    candidate: tuple[float, ...],
+    unit_inputs: UnitData,
+    settings: Settings,
 ) -> tuple[str, float, float]:
     """Solve a shape candidate's amounts exactly; return its status, objective and premium.
 
     A candidate whose amounts the solver finds infeasible is ``"infeasible"``;
     any other failure raises.
     """
-    unit, problem = _shape_candidate(grid, candidate, data)
+    unit, problem = _shape_candidate(grid, candidate, unit_inputs)
     try:
-        solution = solve_problem(problem, data.objective, data.pricing, settings, 1)
+        solution = solve_problem(
+            problem, unit_inputs.objective, unit_inputs.pricing, settings, 1
+        )
     except InfeasibleCalibrationError:
         return STATUSES[1], np.nan, np.nan
     paid = unit.basis @ snap_amounts(solution.amounts, unit.constraints)
     value, premium = verify_solution(
         problem,
         np.asarray(paid, dtype=np.float64).reshape(-1, 1),
-        objective=data.objective,
-        pricing=data.pricing,
+        objective=unit_inputs.objective,
+        pricing=unit_inputs.pricing,
         solution=solution,
         tolerance=settings.tolerance,
     )
     return STATUSES[0], value, premium
 
 
-def _solve_shapes(grid: UnitGrid, data: UnitData, settings: Settings) -> GridSolved:
+def _solve_shapes(
+    grid: UnitGrid, unit_inputs: UnitData, settings: Settings
+) -> GridSolved:
     """Solve the amounts exactly at every shape candidate; return the chosen one.
 
     The chosen candidate is solved again, with the ranges if the settings
@@ -620,10 +642,14 @@ def _solve_shapes(grid: UnitGrid, data: UnitData, settings: Settings) -> GridSol
     profile = _Profile.empty(len(grid.candidates))
     plain = dataclasses.replace(settings, ranges=False)
     for position, candidate in enumerate(grid.candidates):
-        profile.set(position, _shape_value(grid, candidate, data, plain))
-    chosen = profile.choose(settings.tolerance, data.reference(), str(grid.unit_id))
-    unit, problem = _shape_candidate(grid, grid.candidates[chosen], data)
-    solution = solve_problem(problem, data.objective, data.pricing, settings, 1)
+        profile.set(position, _shape_value(grid, candidate, unit_inputs, plain))
+    chosen = profile.choose(
+        settings.tolerance, unit_inputs.reference(), str(grid.unit_id)
+    )
+    unit, problem = _shape_candidate(grid, grid.candidates[chosen], unit_inputs)
+    solution = solve_problem(
+        problem, unit_inputs.objective, unit_inputs.pricing, settings, 1
+    )
     amounts = final_amounts([unit], solution.amounts, settings.fill)[grid.unit_id]
     values = dict(zip(grid.names, grid.candidates[chosen]))
     values.update(
@@ -647,7 +673,7 @@ def _solve_shapes(grid: UnitGrid, data: UnitData, settings: Settings) -> GridSol
     )
 
 
-def solve_grid(grid: UnitGrid, data: UnitData, settings: Settings) -> GridSolved:
+def solve_grid(grid: UnitGrid, unit_inputs: UnitData, settings: Settings) -> GridSolved:
     """Solve one unit's design problem on its grid (module docstring).
 
     Raises
@@ -664,12 +690,12 @@ def solve_grid(grid: UnitGrid, data: UnitData, settings: Settings) -> GridSolved
         If a payout returns invalid payouts.
     """
     if grid.exact:
-        if data.bound is None and not isinstance(data.objective, MSE):
-            first, _ = _shape_candidate(grid, grid.candidates[0], data)
-            check_bounded([first], data.objective.name)
-        solved = _solve_shapes(grid, data, settings)
+        if unit_inputs.bound is None and not isinstance(unit_inputs.objective, MSE):
+            first, _ = _shape_candidate(grid, grid.candidates[0], unit_inputs)
+            check_bounded([first], unit_inputs.objective.name)
+        solved = _solve_shapes(grid, unit_inputs, settings)
     else:
-        solved = _solve_numpy(grid, data, settings)
+        solved = _solve_numpy(grid, unit_inputs, settings)
     feasible = solved.profile["status"].eq(STATUSES[0]).sum()
     LOGGER.info(
         "design problem %r: %d grid candidates of %s, %d feasible, %d tied with the "

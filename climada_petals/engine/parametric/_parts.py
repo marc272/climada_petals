@@ -194,9 +194,9 @@ def source_token(index: ParametricIndex) -> str:
         (index.event_id[order], np.int64),
         (index.values[order], np.float64),
     ):
-        data = np.ascontiguousarray(values, dtype=dtype)
-        digest.update(np.int64(data.size).tobytes())
-        digest.update(data.tobytes())
+        contiguous = np.ascontiguousarray(values, dtype=dtype)
+        digest.update(np.int64(contiguous.size).tobytes())
+        digest.update(contiguous.tobytes())
     return f"sha256:{digest.hexdigest()}"
 
 

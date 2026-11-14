@@ -491,6 +491,7 @@ def payout_from_dict(document: Mapping[str, Any]) -> PayoutFunction:
     Returns
     -------
     PayoutFunction
+        A payout of the family registered for the document's ``kind``.
 
     Raises
     ------

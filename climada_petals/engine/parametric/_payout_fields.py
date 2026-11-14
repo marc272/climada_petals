@@ -225,13 +225,14 @@ def field_document(payout: PayoutFunction) -> dict[str, Any]:
     return document
 
 
-def payout_from_fields(cls: type[_P], document: Mapping[str, Any]) -> _P:
-    """Read a dataclass payout of the family ``cls`` from its document.
+def payout_from_fields(family: type[_P], document: Mapping[str, Any]) -> _P:
+    """Read a dataclass payout of a family from its document.
 
     Parameters
     ----------
-    cls : type
-        A frozen dataclass family.
+    family : type
+        The family: a frozen dataclass subclass of
+        :class:`~climada_petals.engine.parametric.payout.PayoutFunction`.
     document : mapping
         As in
         :meth:`~climada_petals.engine.parametric.payout.PayoutFunction.from_dict`.
@@ -239,7 +240,7 @@ def payout_from_fields(cls: type[_P], document: Mapping[str, Any]) -> _P:
     Returns
     -------
     PayoutFunction
-        A payout of the family ``cls``.
+        A payout of the family.
 
     Raises
     ------
@@ -247,20 +248,20 @@ def payout_from_fields(cls: type[_P], document: Mapping[str, Any]) -> _P:
         As
         :meth:`~climada_petals.engine.parametric.payout.PayoutFunction.from_dict`.
     """
-    if not isinstance(document, Mapping) or document.get("kind") != cls.kind:
+    if not isinstance(document, Mapping) or document.get("kind") != family.kind:
         raise CoverDefinitionError(
-            f"a {cls.__name__} document has kind {cls.kind!r}, got {document!r}"
+            f"a {family.__name__} document has kind {family.kind!r}, got {document!r}"
         )
-    fields = {field_def.name: field_def for field_def in constructor_fields(cls)}
+    fields = {field_def.name: field_def for field_def in constructor_fields(family)}
     unknown = set(document) - set(fields) - {"kind"}
     missing = {name for name, field_def in fields.items() if required_field(field_def)}
     missing -= set(document)
     if unknown or missing:
         raise CoverDefinitionError(
-            f"a {cls.kind} payout document has unknown keys {sorted(unknown)} "
+            f"a {family.kind} payout document has unknown keys {sorted(unknown)} "
             f"and misses {sorted(missing)}"
         )
     kwargs = {
         name: field_from_document(document[name]) for name in fields if name in document
     }
-    return cls(**kwargs)
+    return family(**kwargs)
