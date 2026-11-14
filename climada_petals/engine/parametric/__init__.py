@@ -33,9 +33,10 @@ from CLIMADA's ``Hazard``, ``TCTracks``, ``Exposures`` and ``Impact``:
   :class:`PayoutFunction` protocol and :func:`register_payout`. Nothing is
   paid below the first threshold.
 * **Units:** :class:`InsuredUnits`, the exposure points that share one
-  payout function: one point, a group (a column such as ``region_id``, or
-  polygons) or the whole exposure set. A unit's loss sums ``imp_mat`` over
-  its points, and its payout maps back to them by value share.
+  payout function: one point, a group (a column such as ``region_id``,
+  polygons, or the subareas of ``cat_bonds``) or the whole exposure set. A
+  unit's loss sums ``imp_mat`` over its points, and its payout maps back to
+  them by value share.
 * **Index:** :class:`ParametricIndex`, one value per event and unit with its
   :class:`IndexDefinition`, on any hazard: a statistic of a ``Hazard``'s
   footprint over each unit (:meth:`~ParametricIndex.from_hazard`), the
@@ -107,6 +108,66 @@ from CLIMADA's ``Hazard``, ``TCTracks``, ``Exposures`` and ``Impact``:
   scenario, with the label in the ``scenario`` column, and
   :func:`calibrate_per_scenario` designs one per scenario
   (:func:`designs_table`). The tables rank no scenario and no cover.
+
+Working with ``cat_bonds``
+--------------------------
+:mod:`climada_petals.engine.cat_bonds` designs parametric cat bonds for a
+sovereign: one linear payout per subarea of a country's exposure, with its
+two triggers fitted by COBYLA, then the pooling of countries into bonds and
+the bonds' pricing. This module designs covers for one risk owner, with any
+payout family and objective. The two fit together:
+
+* **Units.** :meth:`InsuredUnits.from_subareas` makes one unit of each
+  subarea of a ``Subareas``, named by its ``subarea_letter``. A
+  ``Subareas`` maps no point to a subarea, so the points are joined to its
+  polygons, and the subareas must cover every point of positive value.
+* **Index.** ``index_stat`` keeps its name and values: ``"mean"`` or a
+  percentile, in :meth:`ParametricIndex.from_hazard`. ``cat_bonds`` takes
+  the statistic over the hazard's centroids inside a subarea's polygon,
+  this module over the centroids of the unit's points; the two agree when
+  the centroids are the exposure points. Events are matched on
+  ``event_id`` here, and by position in ``cat_bonds``.
+* **Payout.** ``LinearPayout.from_triggers(min_trig, max_trig, max_pay)``
+  pays what ``calc_payout(min_trig, max_trig, haz_int, max_pay)`` pays on
+  a float index. On an integer-typed index ``calc_payout`` truncates the
+  payouts, and this module doesn't. With ``min_trig > max_trig``,
+  ``calc_payout`` pays ``max_pay`` from ``max_trig`` on, as
+  ``BinaryPayout(max_trig, max_pay)`` does.
+* **Fit.** ``cat_bonds`` fits each subarea's triggers, unconstrained, to
+  the sum over the events of the squared error between the subarea's loss
+  and its payout, with ``max_pay`` fixed at the smaller of the subarea's
+  largest loss and the principal. :class:`MSE` on :class:`EventBasis`
+  weights each event by its frequency, so with equal frequencies ``f`` it
+  is ``f`` times that sum. A template
+  ``LinearPayout.from_triggers(Free(..., grid=...), Free(..., grid=...),
+  max_pay)``, calibrated with ``scope="individual"``, searches the
+  triggers on the stated grids; with a free limit under
+  ``Limit.largest_loss()`` it also solves for the payout at the
+  exhaustion, up to the unit's largest loss.
+* **Bonds.** Bond simulation, pooling and pricing stay in ``cat_bonds``,
+  and have no counterpart here.
+
+The terms of ``cat_bonds``, and their counterparts here:
+
+* A subarea and its ``subarea_letter``: an insured unit and its
+  ``unit_id``.
+* ``min_trig``, ``max_trig`` and ``max_pay``: the ``attachment`` and the
+  ``exhaustion``, in index units, and the ``limit``, in payout units, of a
+  :class:`LinearPayout`.
+* ``attachment_point`` and ``exhaustion_point``: levels of loss that set a
+  bond's principal, with no counterpart. An attachment here is an index
+  threshold.
+* ``principal``: it caps each subarea's ``max_pay`` and each event's total
+  payout. A :class:`Limit` caps one unit's payout per event, and nothing
+  here caps the total over the units.
+* "Basis risk": there, the event-level squared error that the fit
+  minimises, :class:`MSE` here. Here, basis risk is a family of metrics of
+  :func:`evaluate`.
+* "Pooling": there, grouping countries into one bond, with no counterpart.
+  ``scope="joint"`` calibrates the units of one owner together.
+* ``SubareaCalculations.create_pay_vs_dam`` and its ``pay_vs_dam`` table:
+  :func:`calibrate`, which returns a :class:`CalibrationResult`, and
+  :func:`payout_impact`, the payouts per event and exposure point.
 
 The module depends only on CLIMADA, numpy, scipy, pandas and matplotlib.
 """
