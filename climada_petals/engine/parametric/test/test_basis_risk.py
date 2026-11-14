@@ -587,11 +587,16 @@ class TestFromImpactDraws(unittest.TestCase):
         plain = evaluate(self.cover, averaged, split="in_sample").iloc[0]
         self.assertAlmostEqual(plain["expected_uncovered"], 0.35, places=12)
         self.assertAlmostEqual(plain["false_negative_rate_l0"], 1.0 / 3.0, places=12)
-        # One Impact per draw, with the events' own frequencies.
+        # One Impact per draw, with the events' own frequencies: aai_agg 0.5
+        # and 0.4, whose mean is the table's E[U].
+        found = []
         for draw, expected in ((0, [0.0, 3.0, 2.0]), (1, [3.0, 0.0, 1.0])):
             shortfall = uncovered_impact(self.cover, self.sample, draw=draw)
             np.testing.assert_allclose(shortfall.at_event, expected)
             np.testing.assert_allclose(shortfall.frequency, [0.1] * 3)
+            found.append(shortfall.aai_agg)
+        np.testing.assert_allclose(found, [0.5, 0.4])
+        self.assertAlmostEqual(float(np.mean(found)), unit["expected_uncovered"])
         # With the draw's own Impact, its events in its order: 3, 1, 2.
         given = uncovered_impact(self.cover, self.sample, impact=self.draws[1], draw=1)
         np.testing.assert_allclose(given.at_event, [1.0, 3.0, 0.0])
