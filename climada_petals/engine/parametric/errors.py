@@ -27,9 +27,12 @@ from __future__ import annotations
 
 __all__ = [
     "CalibrationError",
+    "CoverDefinitionError",
     "MissingDependencyError",
     "ParametricError",
     "ParametricInputError",
+    "UnknownPayoutKindError",
+    "UnresolvedParameterError",
 ]
 
 
@@ -43,6 +46,32 @@ class ParametricInputError(ParametricError, ValueError):
     Examples: index values that are not finite, an ``Impact`` whose events
     are not the index's events, or frequencies that do not fit the annual
     basis.
+    """
+
+
+class CoverDefinitionError(ParametricError, ValueError):
+    """A payout, a parameter or a cover is invalid.
+
+    Examples: breakpoints out of order, a negative amount, a free threshold
+    without a grid, a payout whose ``tail`` is not its index's, or a cover
+    document with an unknown field.
+    """
+
+
+class UnknownPayoutKindError(CoverDefinitionError):
+    """A cover document names a payout ``kind`` that no class is registered for.
+
+    A user-defined family is registered with
+    :func:`~climada_petals.engine.parametric.payout.register_payout`.
+    """
+
+
+class UnresolvedParameterError(ParametricError, ValueError):
+    """A template is used where a resolved payout or cover is needed.
+
+    A template has a free parameter, or a limit stated as a rule, such as
+    the largest loss on a design sample. ``with_values`` or the calibration
+    resolves it.
     """
 
 

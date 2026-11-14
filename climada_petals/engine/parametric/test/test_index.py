@@ -191,7 +191,7 @@ class TestSimulationYears(unittest.TestCase):
         np.testing.assert_array_equal(train, np.arange(7000))
         np.testing.assert_array_equal(test, np.arange(7000, N_CATALOGUE))
         np.testing.assert_array_equal(index.event_mask(test), [False] * 4 + [True] * 3)
-        payout = StepPayout(attachment=20, limit=70, n_steps=5)
+        payout = StepPayout.uniform(attachment=20, exhaustion=70, n_steps=5)
         for scope in ("individual", "portfolio"):
             cover = calibrate(
                 index,
