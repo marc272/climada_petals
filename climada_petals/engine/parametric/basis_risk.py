@@ -243,8 +243,7 @@ def _unit_row(
     level, tolerance, sign = rule
     n_draws = loss.size // values.size
     index = np.tile(values, n_draws)
-    lossy = (loss.reshape(n_draws, values.size) > 0).any(axis=0)
-    events = lossy | (values != 0)
+    events = (loss.reshape(n_draws, values.size) > 0).any(axis=0) | (values != 0)
     rows = np.tile(events, n_draws)
     rho = _spearman(index[rows], loss[rows], weights[rows])
     gap = _monotone_gap(sign * index[rows], loss[rows], weights[rows])
