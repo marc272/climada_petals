@@ -37,11 +37,20 @@ Constraints of a design problem: the premium budget, the amounts and the limit.
   sample into each unit's largest event loss (:func:`resolve_limit`), and
   the resolved cover holds those numbers.
 
+On a design sample, :func:`unit_amounts` gives each unit of a template its
+payout's basis, its constraints with the limit, and which free amounts are
+unidentified: no row of the sample with a weight reaches them. It refuses
+what this version's route doesn't take: a payout that is not linear in its
+amounts, or a free shape parameter (a threshold), which needs a grid, and
+which a joint design never has.
+
 After a solve, :func:`snap_amounts` moves the solver's amounts onto their
 bounds and their monotone order, which a solver meets only to its
-tolerance, and :func:`fill_amounts` sets the amounts that no outcome of the
-design sample reaches by the stated fill rule. :func:`violation` measures
-how far amounts break their constraints, for the checks after the solve.
+tolerance, and :func:`fill_amounts` sets the unidentified amounts by the
+stated fill rule (:func:`final_amounts` does both per unit).
+:func:`resolved_cover` writes them, and the resolved limit, into the cover.
+:func:`violation` measures how far amounts break their constraints, for
+the checks after the solve.
 """
 
 from __future__ import annotations
@@ -476,7 +485,7 @@ def unit_amounts(
         If a fixed amount is above the unit's limit.
     """
     values = sample.index_values
-    reached_rows = sample.measure.event_weight > 0
+    weighted = (sample.measure.event_weight > 0).astype(np.float64)
     units = []
     for position, unit in enumerate(sample.unit_id):
         payout = _route_payout(template, unit, scope)
@@ -490,7 +499,7 @@ def unit_amounts(
             )
         basis = sp.csr_matrix(payout.basis(values[:, position]))
         free = _free_amounts(payout)
-        reached = sp.csr_matrix(basis[reached_rows]).getnnz(axis=0) > 0
+        reached = np.asarray(abs(basis).T @ weighted).reshape(-1) > 0
         units.append(
             UnitAmounts(unit, payout, constraints, basis, free, free & ~reached)
         )

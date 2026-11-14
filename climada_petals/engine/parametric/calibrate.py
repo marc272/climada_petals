@@ -503,7 +503,7 @@ class CalibrationResult:
                 continue
             columns = [payout.amount_names().index(name) for name in names]
             basis = sp.csc_matrix(payout.basis(index.values[:, position]))[:, columns]
-            out[:, position] = basis.getnnz(axis=1) > 0
+            out[:, position] = np.asarray(abs(basis).sum(axis=1)).reshape(-1) > 0
         return out
 
     def summary(self) -> pd.DataFrame:

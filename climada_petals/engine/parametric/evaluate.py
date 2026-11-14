@@ -358,14 +358,15 @@ class _Subject(NamedTuple):
 def _unit_subjects(
     found: _Entry,
     sample: OutcomeSample,
-    paid: tuple[NDArray[np.float64], NDArray[np.bool_] | None],
+    payouts: tuple[NDArray[np.float64], NDArray[np.bool_] | None],
     context: _Context,
 ) -> list[_Subject]:
     """Return the ``"unit"`` subjects of a cover or an individual design.
 
-    ``paid`` is the payout per row and unit, and where it is filled, or None.
+    ``payouts`` holds the payout per row and unit, and where a design's
+    payout comes from an amount its fill rule set, or None.
     """
-    paid, filled = paid
+    paid, filled = payouts
     loss = sp.csc_matrix(sample.loss)
     single = sample.n_units == 1 and context.premium is not None
     subjects = []
@@ -396,12 +397,12 @@ def _unit_subjects(
 def _total_subject(
     found: _Entry,
     sample: OutcomeSample,
-    paid: tuple[NDArray[np.float64], NDArray[np.bool_] | None],
+    payouts: tuple[NDArray[np.float64], NDArray[np.bool_] | None],
     context: _Context,
     units: list[_Subject],
 ) -> _Subject:
     """Return the ``"total"`` subject: the owner's total over the units."""
-    paid, filled = paid
+    paid, filled = payouts
     total = paid.sum(axis=1)
     if found.scope == _INDIVIDUAL:
         premium = float(sum(found.premiums))
@@ -572,17 +573,17 @@ def evaluate(
     found = _entry(entry, _check_sample(sample))
     context = _context(found, sample, split, fold, (pricing, premium, options))
     rows = sample.event_row
-    paid = (
+    payouts = (
         found.pay(sample.index)[rows],
         None if found.filled is None else found.filled(sample.index)[rows],
     )
     if found.scope == JOINT:
-        subjects = [_total_subject(found, sample, paid, context, [])]
+        subjects = [_total_subject(found, sample, payouts, context, [])]
         if options.allocation is not None:
             subjects += _allocated_subjects(sample, subjects[0], options.allocation)
     else:
-        subjects = _unit_subjects(found, sample, paid, context)
-        subjects.append(_total_subject(found, sample, paid, context, subjects))
+        subjects = _unit_subjects(found, sample, payouts, context)
+        subjects.append(_total_subject(found, sample, payouts, context, subjects))
     return _frame([_row(found, sample, s, context) for s in subjects], options)
 
 
