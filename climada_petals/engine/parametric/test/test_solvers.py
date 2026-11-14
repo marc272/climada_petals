@@ -477,6 +477,123 @@ class TestLinearProgramRoute(unittest.TestCase):
         )
 
 
+class TestRanges(unittest.TestCase):
+    """The ranges of the amounts over the near-optimal set, on the LP route."""
+
+    def test_a_flat_direction(self) -> None:
+        # Losses 4 and 10 in two of ten years, steps from 20 and 45, budget
+        # 0.7: every split of 7 over the two levels with the first at most the
+        # second is optimal, so the first ranges over [0, 3.5].
+        sample, _ = array_sample([[30.0], [60.0]], [[4.0], [10.0]], [0, 1], 10)
+        result = calibrate(
+            template(sample, PAYOUT),
+            sample,
+            ExpectedUncovered(),
+            scope="individual",
+            budget=Budget(ratio=0.5),
+            options=CalibrationOptions(ranges=True),
+        )
+        ranges = result.ranges["U0"]
+        np.testing.assert_allclose(ranges["levels[0]"], (0.0, 3.5), atol=1e-6)
+        np.testing.assert_allclose(ranges["levels[1]"], (3.5, 7.0), atol=1e-6)
+        self.assertIs(result.unique, False)
+        self.assertEqual(result.problems[0].ranges[0][:2], ("U0", "levels[0]"))
+        levels = result.cover.payout["U0"].levels
+        for name, value in zip(("levels[0]", "levels[1]"), levels):
+            self.assertTrue(ranges[name][0] - 1e-9 <= value <= ranges[name][1] + 1e-9)
+
+    def test_a_unique_optimum(self) -> None:
+        # A false positive at 30 and the losses 6 and 10 at 45 and 60: with
+        # steps from 40 and 55 and the budget E[L], only (6, 10) covers all.
+        sample, _ = array_sample(
+            [[30.0], [45.0], [60.0]], [[0.0], [6.0], [10.0]], [0, 1, 2], 10
+        )
+        payout = StepPayout([40.0, 55.0], [Free(), Free()])
+        result = calibrate(
+            template(sample, payout),
+            sample,
+            ExpectedUncovered(),
+            scope="individual",
+            budget=Budget(ratio=1.0),
+            options=CalibrationOptions(ranges=True),
+        )
+        ranges = result.ranges["U0"]
+        np.testing.assert_allclose(ranges["levels[0]"], (6.0, 6.0), atol=1e-6)
+        np.testing.assert_allclose(ranges["levels[1]"], (10.0, 10.0), atol=1e-6)
+        self.assertIs(result.unique, True)
+        self.assertTrue(result.summary()["unique"].iloc[0])
+
+    def test_a_joint_split_is_not_unique(self) -> None:
+        # Two units with the same index and loss: the joint objective sees
+        # only their total payout. The budget E[L] = 2.8 covers the totals 8
+        # and 20; each unit's limit of 10 pins the top levels at 10, and the
+        # first levels split 8 in any way.
+        sample, _ = array_sample(
+            [[30.0, 30.0], [60.0, 60.0]], [[4.0, 4.0], [10.0, 10.0]], [0, 1], 10
+        )
+        result = calibrate(
+            template(sample, PAYOUT),
+            sample,
+            ExpectedUncovered(),
+            scope="joint",
+            budget=Budget(ratio=1.0),
+            options=CalibrationOptions(ranges=True),
+        )
+        self.assertIs(result.unique, False)
+        self.assertEqual(set(result.ranges), {"U0", "U1"})
+        for unit in ("U0", "U1"):
+            ranges = result.ranges[unit]
+            np.testing.assert_allclose(ranges["levels[0]"], (0.0, 8.0), atol=1e-6)
+            np.testing.assert_allclose(ranges["levels[1]"], (10.0, 10.0), atol=1e-6)
+
+    def test_unidentified_amounts_and_the_mean_squared_error_have_none(self) -> None:
+        # The second unit's first step is reached by no event.
+        solution = solve_design(
+            _problem(bound=0.5),
+            WeightedCVaR(alpha=0.9, beta=0.8),
+            PurePremium(),
+            method="highs",
+            ranges=True,
+        )
+        self.assertEqual(solution.ranges.shape, (4, 2))
+        self.assertTrue(np.isnan(solution.ranges[2]).all())
+        for amount, (low, high) in zip(
+            solution.amounts[[0, 1, 3]], solution.ranges[[0, 1, 3]]
+        ):
+            self.assertTrue(low - 1e-6 <= amount <= high + 1e-6)
+        squared = solve_design(
+            _problem(bound=0.5), MSE(), PurePremium(), method="highs", ranges=True
+        )
+        self.assertIsNone(squared.ranges)
+        self.assertIsNotNone(squared.unique)
+
+    def test_a_failed_ranging_lp_raises(self) -> None:
+        real = __import__("scipy.optimize", fromlist=["linprog"]).linprog
+        calls: list[int] = []
+
+        def first_only(*args: Any, **kwargs: Any) -> Any:
+            calls.append(1)
+            if len(calls) == 1:
+                return real(*args, **kwargs)
+            return SimpleNamespace(status=4, message="trouble", x=None, fun=None, nit=0)
+
+        with (
+            mock.patch(
+                "climada_petals.engine.parametric.solvers.linprog",
+                side_effect=first_only,
+            ),
+            self.assertRaisesRegex(CalibrationError, "trouble") as caught,
+        ):
+            solve_design(
+                _problem(bound=0.5),
+                ExpectedUncovered(),
+                PurePremium(),
+                method="highs",
+                ranges=True,
+            )
+        self.assertIn("ranging", " ".join(caught.exception.__notes__))
+
+
 class TestChecks(unittest.TestCase):
     """The checks after a solve."""
 

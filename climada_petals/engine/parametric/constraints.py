@@ -39,10 +39,11 @@ Constraints of a design problem: the premium budget, the amounts and the limit.
 
 On a design sample, :func:`unit_amounts` gives each unit of a template its
 payout's basis, its constraints with the limit, and which free amounts are
-unidentified: no row of the sample with a weight reaches them. It refuses
-what this version's route doesn't take: a payout that is not linear in its
-amounts, or a free shape parameter (a threshold), which needs a grid, and
-which a joint design never has.
+unidentified: no row of the sample with a weight reaches them
+(:func:`unit_amount` does it for one unit's payout). It refuses what the
+exact route doesn't take: a payout that is not linear in its amounts, or a
+free shape parameter (a threshold). The calibration takes those on the
+grid route, in the individual scope; a joint design never has them.
 
 After a solve, :func:`snap_amounts` moves the solver's amounts onto their
 bounds and their monotone order, which a solver meets only to its
@@ -80,9 +81,11 @@ __all__ = [
     "check_unpaid_at_zero",
     "fill_amounts",
     "final_amounts",
+    "payout_at_zero",
     "resolve_limit",
     "resolved_cover",
     "snap_amounts",
+    "unit_amount",
     "unit_amounts",
     "violation",
 ]
@@ -431,8 +434,8 @@ def _route_payout(template: ParametricCover, unit: Hashable, scope: str) -> Any:
     if not isinstance(payout, LinearInAmounts):
         raise ParametricInputError(
             f"the {payout.kind} payout of unit {unit!r} is not linear in its amounts "
-            "(LinearInAmounts); such a payout needs the grid route, which this "
-            "version doesn't have yet"
+            "(LinearInAmounts), which the exact route needs; such a payout takes "
+            "the grid route, in the individual scope"
         )
     shapes = [
         name
@@ -447,15 +450,63 @@ def _route_payout(template: ParametricCover, unit: Hashable, scope: str) -> Any:
         )
     if shapes:
         raise ParametricInputError(
-            f"unit {unit!r} has the free shape parameters {shapes}, which need the "
-            "grid route; this version doesn't have it yet. Fix them, or compare "
-            "them by running the design several times"
+            f"unit {unit!r} has the free shape parameters {shapes}, which the exact "
+            "route can't solve for; they need the grid route"
         )
     return payout
 
 
+def unit_amount(
+    unit_id: Hashable,
+    payout: LinearInAmounts,
+    values: NDArray[np.float64],
+    weighted: NDArray[np.float64],
+    cap: float | None,
+) -> UnitAmounts:
+    """Return one unit's payout, constraints, basis and unidentified amounts.
+
+    Parameters
+    ----------
+    unit_id : str or int
+        The unit.
+    payout : LinearInAmounts
+        Its payout, with every shape parameter fixed.
+    values : numpy.ndarray
+        The unit's index per row of the design sample.
+    weighted : numpy.ndarray
+        1 for a row with a weight, else 0.
+    cap : float or None
+        The unit's limit, resolved.
+
+    Returns
+    -------
+    UnitAmounts
+
+    Raises
+    ------
+    CoverDefinitionError
+        If a fixed amount, or the lower bound of a free one, is above ``cap``.
+    """
+    constraints = payout.amount_constraints(cap)
+    if not constraints.bounds_feasible:
+        raise CoverDefinitionError(
+            f"the {payout.kind} payout of unit {unit_id!r} can't stay within its "
+            f"limit {cap}: a fixed amount, or the lower bound of a free one, is "
+            "above it"
+        )
+    basis = sp.csr_matrix(payout.basis(values))
+    free = _free_amounts(payout)
+    reached = np.asarray(abs(basis).T @ weighted).reshape(-1) > 0
+    return UnitAmounts(unit_id, payout, constraints, basis, free, free & ~reached)
+
+
 def unit_amounts(
-    template: ParametricCover, sample: OutcomeSample, *, scope: str, limit: Limit | None
+    template: ParametricCover,
+    sample: OutcomeSample,
+    *,
+    scope: str,
+    limit: Limit | None,
+    positions: Sequence[int] | None = None,
 ) -> list[UnitAmounts]:
     """Return every unit's payout, constraints, basis and unidentified amounts.
 
@@ -469,11 +520,14 @@ def unit_amounts(
         The calibration scope.
     limit : Limit or None
         The template's limit, resolved (:func:`resolve_limit`).
+    positions : sequence of int, optional
+        The units to build, by their position in the sample. Default: every
+        unit.
 
     Returns
     -------
     list of UnitAmounts
-        One per unit, in the sample's order.
+        One per unit of ``positions``, in their order.
 
     Raises
     ------
@@ -487,22 +541,13 @@ def unit_amounts(
     values = sample.index_values
     weighted = (sample.measure.event_weight > 0).astype(np.float64)
     units = []
-    for position, unit in enumerate(sample.unit_id):
+    if positions is None:
+        positions = range(len(sample.unit_id))
+    for position in positions:
+        unit = sample.unit_id[position]
         payout = _route_payout(template, unit, scope)
         cap = None if limit is None else limit.amount_of(unit)
-        constraints = payout.amount_constraints(cap)
-        if not constraints.bounds_feasible:
-            raise CoverDefinitionError(
-                f"the {payout.kind} payout of unit {unit!r} can't stay within its "
-                f"limit {cap}: a fixed amount, or the lower bound of a free one, is "
-                "above it"
-            )
-        basis = sp.csr_matrix(payout.basis(values[:, position]))
-        free = _free_amounts(payout)
-        reached = np.asarray(abs(basis).T @ weighted).reshape(-1) > 0
-        units.append(
-            UnitAmounts(unit, payout, constraints, basis, free, free & ~reached)
-        )
+        units.append(unit_amount(unit, payout, values[:, position], weighted, cap))
     return units
 
 
@@ -540,17 +585,25 @@ def check_bounded(units: Sequence[UnitAmounts], objective_name: str) -> None:
         )
 
 
+def payout_at_zero(payout: LinearInAmounts, constraints: AmountConstraints) -> float:
+    """Return the most a payout may pay at an index of 0, its amounts at their upper bounds.
+
+    An amount without an upper bound counts as 1: any positive value says
+    that the payout may pay there.
+    """
+    at_zero = sp.csr_matrix(payout.basis(np.zeros(1))).toarray()[0]
+    upper = constraints.upper
+    return float(at_zero @ np.where(np.isfinite(upper), upper, 1.0))
+
+
 def check_unpaid_at_zero(sample: OutcomeSample, units: Sequence[UnitAmounts]) -> None:
     """Raise if the sample left events out and a payout may pay at an index of 0.
 
     See :func:`~climada_petals.engine.parametric.sample.check_left_out_unpaid`.
     """
-    paid_at_zero = []
-    for unit in units:
-        at_zero = sp.csr_matrix(unit.payout.basis(np.zeros(1))).toarray()[0]
-        upper = unit.constraints.upper
-        paid_at_zero.append(float(at_zero @ np.where(np.isfinite(upper), upper, 1.0)))
-    check_left_out_unpaid(sample, paid_at_zero)
+    check_left_out_unpaid(
+        sample, [payout_at_zero(unit.payout, unit.constraints) for unit in units]
+    )
 
 
 def final_amounts(
@@ -588,9 +641,15 @@ def resolved_cover(
     units: Sequence[UnitAmounts],
     amounts: Mapping[Hashable, NDArray[np.float64]],
     limit: Limit | None,
+    others: Mapping[Hashable, Mapping[str, float]] | None = None,
 ) -> ParametricCover:
-    """Return the template with its free amounts set and its limit resolved."""
-    values = {
+    """Return the template with its free parameters set and its limit resolved.
+
+    ``units`` and ``amounts`` set the free amounts of the units solved on
+    the exact route; ``others`` sets every free parameter of the other
+    units, by unit id, such as those designed on a grid.
+    """
+    values: dict[Hashable, Mapping[str, float]] = {
         unit.unit_id: {
             name: float(value)
             for name, value, free in zip(
@@ -600,4 +659,5 @@ def resolved_cover(
         }
         for unit in units
     }
+    values.update(others or {})
     return replace(template.with_values(values), limit=limit)

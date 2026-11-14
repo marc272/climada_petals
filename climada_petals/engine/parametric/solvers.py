@@ -89,6 +89,27 @@ the round's solution, until the premium meets the budget within
 which names it. The route also reports whether the design's identified
 amounts are unique, from the smallest eigenvalue of the objective's Hessian
 restricted to them (``Solution.unique``).
+
+**Ranges on the LP route** (``ranges=True``). One optimal vertex is one
+member of what may be a set of optimal designs. With ``ranges=True`` each
+identified amount (not fixed, and reached by a row with a weight) is
+ranged over the near-optimal set
+``{feasible x : c x <= c* + eps max(1, |c*|)}``, with ``c`` the LP's cost
+(the objective divided by that of the zero cover) and ``c*`` its optimum,
+re-solved first at HiGHS's tolerances of ``1e-10``
+(:data:`RANGE_HIGHS_OPTIONS`). Each amount is ranged twice, at a wide and a
+narrow tolerance (:data:`RANGE_TOLERANCES`, ``1e-9`` and ``1e-11``): its
+smallest and its largest value, so four LPs per amount, each as large as
+the design problem's own LP. Near the optimum
+the width of a range is ``w0 + eps / s``, with ``w0`` the width of the
+optimal set along the amount and ``s`` the objective's slope there. At a
+unique vertex ``w0 = 0``, so the width falls with ``eps``; on a set of
+optimal designs it keeps ``w0``. An amount is **pinned** when its narrow
+range is at most half its wide one, or narrower than ``1e-7`` of the scale
+(:data:`PINNED_SHARE`, :data:`PINNED_WIDTH`), and the design is unique when
+every identified amount is pinned. ``Solution.ranges`` holds the wide
+ranges, in loss units. An optimal set narrower than about ``1e-9 / s`` is
+reported as unique.
 """
 
 from __future__ import annotations
@@ -129,16 +150,22 @@ __all__ = [
     "HIGHS_OPTIONS",
     "LP_METHODS",
     "MIN_SCALE_LOSS",
+    "PINNED_SHARE",
+    "PINNED_WIDTH",
+    "RANGE_HIGHS_OPTIONS",
+    "RANGE_TOLERANCES",
     "SLSQP_OPTIONS",
     "UNIQUE_RTOL",
     "DesignProblem",
     "QPLimits",
+    "Settings",
     "Solution",
     "SolverInfo",
     "check_amounts",
     "check_limit",
     "lp_method",
     "solve_design",
+    "solve_problem",
     "verify_solution",
 ]
 
@@ -151,6 +178,22 @@ HIGHS_OPTIONS: Final[dict[str, Any]] = {
     "dual_feasibility_tolerance": 1e-9,
 }
 """Options passed to :func:`scipy.optimize.linprog` with either HiGHS method."""
+
+RANGE_TOLERANCES: Final[tuple[float, float]] = (1e-9, 1e-11)
+"""The wide and the narrow tolerance of the near-optimal set (module docstring)."""
+
+RANGE_HIGHS_OPTIONS: Final[dict[str, Any]] = {
+    "presolve": True,
+    "primal_feasibility_tolerance": 1e-10,
+    "dual_feasibility_tolerance": 1e-10,
+}
+"""Options of the LPs that range the amounts, and of the optimum they re-solve."""
+
+PINNED_SHARE: Final[float] = 0.5
+"""An amount is pinned when its narrow range is at most this share of its wide one."""
+
+PINNED_WIDTH: Final[float] = 1e-7
+"""An amount is pinned when its narrow range is narrower than this, in scaled units."""
 
 _LIMIT_STATUS: Final[int] = 1
 _INFEASIBLE_STATUS: Final[int] = 2
@@ -355,34 +398,117 @@ def _assemble(
     return program, theta, norm
 
 
-def _solve_lp(
-    problem: DesignProblem,
-    objective: Objective,
-    pricing: Pricing,
-    *,
-    method: str,
-    time_limit: float | None,
-) -> Solution:
-    """Assemble the LP of the module docstring and solve it with HiGHS."""
-    start = time.perf_counter()
-    program, theta, norm = _assemble(problem, objective, pricing)
-    options = dict(HIGHS_OPTIONS)
-    if time_limit is not None:
-        options["time_limit"] = time_limit
-    result = linprog(
-        np.concatenate(program.cost),
-        A_ub=program.matrix() if program.rows else None,
-        b_ub=np.concatenate(program.rhs) if program.rows else None,
-        bounds=np.column_stack(
-            [np.concatenate(program.lower), np.concatenate(program.upper)]
-        ),
-        method=method,
-        options=options,
-    )
-    if result.status != 0 or result.x is None:
-        raise _linprog_error(result, problem.problem_id, method)
+@dataclass(frozen=True, eq=False)
+class _Arrays:
+    """An assembled LP as ``linprog`` takes it, with its solve's settings."""
+
+    cost: NDArray[np.float64]
+    matrix: sp.csr_matrix
+    rhs: NDArray[np.float64]
+    bounds: NDArray[np.float64]
+    method: str
+    time_limit: float | None
+    problem_id: str
+
+    @classmethod
+    def from_program(
+        cls,
+        program: _LinearProgram,
+        method: str,
+        time_limit: float | None,
+        problem_id: str,
+    ) -> _Arrays:
+        """Return a program's arrays."""
+        cost = np.concatenate(program.cost)
+        return cls(
+            cost,
+            program.matrix() if program.rows else sp.csr_matrix((0, cost.size)),
+            np.concatenate(program.rhs) if program.rows else np.zeros(0),
+            np.column_stack(
+                [np.concatenate(program.lower), np.concatenate(program.upper)]
+            ),
+            method,
+            time_limit,
+            problem_id,
+        )
+
+    def solve(
+        self,
+        cost: NDArray[np.float64],
+        options: dict[str, Any],
+        cut: float | None = None,
+    ) -> Any:
+        """Return ``linprog``'s result for ``cost``; ``cut`` adds ``self.cost @ x <= cut``."""
+        matrix, rhs = self.matrix, self.rhs
+        if cut is not None:
+            matrix = sp.vstack([matrix, sp.csr_matrix(self.cost)], format="csr")
+            rhs = np.append(rhs, cut)
+        settings = dict(options)
+        if self.time_limit is not None:
+            settings["time_limit"] = self.time_limit
+        return linprog(
+            cost,
+            A_ub=matrix if rhs.size else None,
+            b_ub=rhs if rhs.size else None,
+            bounds=self.bounds,
+            method=self.method,
+            options=settings,
+        )
+
+    def ranging(self, cost: NDArray[np.float64], cut: float | None = None) -> float:
+        """Return the optimum of ``cost`` at the ranges' tolerances; raise if not optimal."""
+        result = self.solve(cost, RANGE_HIGHS_OPTIONS, cut)
+        if result.status != 0 or result.x is None:
+            error = _linprog_error(result, self.problem_id, self.method)
+            error.add_note("raised while ranging the amounts (ranges=True)")
+            raise error
+        return float(result.fun)
+
+    def extent(self, column: int, cut: float) -> tuple[float, float]:
+        """Return the smallest and the largest ``x[column]`` with ``cost @ x <= cut``."""
+        unit = np.zeros(self.cost.size)
+        unit[column] = 1.0
+        return self.ranging(unit, cut), -self.ranging(-unit, cut)
+
+
+def _ranges(
+    arrays: _Arrays, theta: slice, problem: DesignProblem
+) -> tuple[NDArray[np.float64], bool]:
+    """Range the identified amounts over the near-optimal set (module docstring).
+
+    Returns
+    -------
+    ranges : numpy.ndarray
+        The wide range of each amount in loss units, shape ``(n_amounts, 2)``;
+        NaN where an amount is not identified.
+    unique : bool
+        Whether every identified amount is pinned; true if none is.
+
+    Raises
+    ------
+    CalibrationError
+        If an LP doesn't end optimal (its typed subclass, as for the solve).
+    """
+    optimum = arrays.ranging(arrays.cost)
+    size = max(1.0, abs(optimum))
+    wide = optimum + RANGE_TOLERANCES[0] * size
+    narrow = optimum + RANGE_TOLERANCES[1] * size
+    ranges = np.full((theta.stop - theta.start, 2), np.nan)
+    unique = True
+    for amount in np.flatnonzero(problem.scaled().identified):
+        ranges[amount] = arrays.extent(theta.start + amount, wide)
+        low, high = arrays.extent(theta.start + amount, narrow)
+        width = float(ranges[amount, 1] - ranges[amount, 0])
+        unique = unique and (
+            high - low <= PINNED_SHARE * width or high - low < PINNED_WIDTH
+        )
+    return ranges * problem.scale, unique
+
+
+def _lp_info(result: Any, method: str, start: float) -> SolverInfo:
+    """Return the record of a solved linear program."""
     nit = getattr(result, "nit", None)
-    info = SolverInfo(
+    return SolverInfo(
         route="lp",
         solver="scipy-highs",
         version=scipy.__version__,
@@ -392,9 +518,37 @@ def _solve_lp(
         iterations=None if nit is None else int(nit),
         seconds=time.perf_counter() - start,
     )
+
+
+def _solve_lp(
+    problem: DesignProblem,
+    objective: Objective,
+    pricing: Pricing,
+    *,
+    method: str,
+    time_limit: float | None,
+    ranges: bool = False,
+) -> Solution:
+    """Assemble the LP of the module docstring and solve it with HiGHS.
+
+    With ``ranges``, also range the amounts (module docstring).
+    """
+    start = time.perf_counter()
+    program, theta, norm = _assemble(problem, objective, pricing)
+    arrays = _Arrays.from_program(program, method, time_limit, problem.problem_id)
+    result = arrays.solve(arrays.cost, HIGHS_OPTIONS)
+    if result.status != 0 or result.x is None:
+        raise _linprog_error(result, problem.problem_id, method)
+    ranged, unique = (
+        _ranges(arrays, program.offset(theta), problem) if ranges else (None, None)
+    )
     amounts = np.asarray(result.x, dtype=np.float64)[program.offset(theta)]
     return Solution(
-        amounts * problem.scale, float(result.fun) * norm * problem.scale, info
+        amounts * problem.scale,
+        float(result.fun) * norm * problem.scale,
+        _lp_info(result, method, start),
+        unique=unique,
+        ranges=ranged,
     )
 
 
@@ -538,6 +692,7 @@ def solve_design(
     method: str,
     time_limit: float | None = None,
     limits: QPLimits = QPLimits(),  # a tuple, so safe to share
+    ranges: bool = False,
 ) -> Solution:
     """Solve one design problem (module docstring).
 
@@ -556,12 +711,17 @@ def solve_design(
         error's route on the whole problem.
     limits : QPLimits, default QPLimits()
         The stated limits of the mean squared error's route.
+    ranges : bool, default False
+        On the LP route, whether to range the amounts over the near-optimal
+        set (module docstring); four more LPs per identified amount. The
+        mean squared error's route has no ranges, and ignores it.
 
     Returns
     -------
     Solution
         The amounts and the objective value in loss units, the solver info,
-        and for the mean squared error whether the design is unique.
+        whether the design is unique (the mean squared error's Hessian test,
+        or the ranges), and the ranges.
 
     Raises
     ------
@@ -577,7 +737,12 @@ def solve_design(
         solution = solve_mse(problem, pricing, time_limit=time_limit, limits=limits)
     else:
         solution = _solve_lp(
-            problem, objective, pricing, method=method, time_limit=time_limit
+            problem,
+            objective,
+            pricing,
+            method=method,
+            time_limit=time_limit,
+            ranges=ranges,
         )
     LOGGER.debug(
         "design problem %r: %s (%s) %s in %.3f s",
@@ -587,4 +752,65 @@ def solve_design(
         solution.info.status,
         solution.info.seconds,
     )
+    return solution
+
+
+@dataclass(frozen=True)
+class Settings:
+    """What the design problems read of ``CalibrationOptions``.
+
+    Attributes
+    ----------
+    fill : {"lowest", "highest"}
+        The fill rule of unidentified amounts.
+    ranges : bool
+        Whether the LP route ranges the amounts.
+    lp_method : {"auto", "highs", "highs-ipm"}
+        The LP method option.
+    time_limit : float or None
+        Seconds per LP, or per mean squared error's design problem.
+    limits : QPLimits
+        The mean squared error's limits and the feasibility tolerance.
+    max_grid_points : int
+        The most grid candidates of one design problem.
+    """
+
+    fill: str
+    ranges: bool
+    lp_method: str
+    time_limit: float | None
+    limits: QPLimits
+    max_grid_points: int
+
+    @property
+    def tolerance(self) -> float:
+        """The feasibility tolerance, relative."""
+        return self.limits.feasibility_tolerance
+
+
+def solve_problem(
+    problem: DesignProblem,
+    objective: Objective,
+    pricing: Pricing,
+    settings: Settings,
+    n_units: int,
+) -> Solution:
+    """Solve one design problem on the exact route; check the solver's amounts.
+
+    Raises
+    ------
+    CalibrationError
+        As :func:`~climada_petals.engine.parametric.solvers.solve_design`
+        and :func:`~climada_petals.engine.parametric.solvers.check_amounts`.
+    """
+    solution = solve_design(
+        problem,
+        objective,
+        pricing,
+        method=lp_method(settings.lp_method, n_units),
+        time_limit=settings.time_limit,
+        limits=settings.limits,
+        ranges=settings.ranges,
+    )
+    check_amounts(problem, solution.amounts, settings.tolerance)
     return solution

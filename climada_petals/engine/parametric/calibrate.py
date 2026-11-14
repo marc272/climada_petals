@@ -59,10 +59,10 @@ design a total row, and per-unit rows only under a stated allocation.
 
 Routes
 ------
-This version has the exact route for a template whose payouts are linear
-in their amounts
-(:class:`~climada_petals.engine.parametric.payout.LinearInAmounts`: the four
-built-in families) with every shape parameter, such as a breakpoint, fixed:
+The **exact routes** take a template whose payouts are linear in their
+amounts (:class:`~climada_petals.engine.parametric.payout.LinearInAmounts`:
+the four built-in families) with every shape parameter, such as a
+breakpoint, fixed:
 
 * ``ExpectedUncovered`` and ``WeightedCVaR``: one linear program per design
   problem, with scipy's HiGHS
@@ -72,9 +72,16 @@ built-in families) with every shape parameter, such as a breakpoint, fixed:
   (:mod:`~climada_petals.engine.parametric.solvers`). It has stated limits:
   ``CalibrationOptions.max_slsqp_amounts`` and ``max_cut_rounds``.
 
-A free shape parameter, a payout that is not linear in its amounts, and
-``CalibrationOptions(ranges=True)`` take routes this version doesn't have,
-and raise. In a joint design, thresholds are always fixed.
+The **grid route** takes the rest, in the individual scope only
+(:mod:`~climada_petals.engine.parametric._grid`): free shape parameters,
+such as a free attachment, on a grid with the exact route at each
+candidate; and a payout that is not linear in its amounts, or a
+:class:`~climada_petals.engine.parametric.objectives.UserObjective`, on a
+grid over every free parameter, evaluated in numpy (``route="grid"``).
+Each free parameter it searches has a stated grid, and
+``CalibrationOptions.max_grid_points`` caps the candidates of one design
+problem. In a joint design, thresholds are always fixed, and the grid
+route raises there.
 
 The constraints are the template's own
 (:mod:`~climada_petals.engine.parametric.constraints`): each amount's bounds
@@ -107,12 +114,18 @@ Non-uniqueness and degenerate tails
   values the constraints allow, which under monotone levels is the previous
   level, or ``"highest"`` the largest. The evaluation reports how much of a
   sample lands on them (``unidentified_share``).
-* **Uniqueness.** On the mean squared error's route, ``unique`` says
-  whether every design problem's identified amounts are unique: the
+* **Uniqueness.** ``unique`` says whether every design problem's
+  identified amounts are unique. On the mean squared error's route: the
   objective's Hessian restricted to them is positive definite (smallest
-  eigenvalue above ``1e-10`` times the largest). On the LP route it is None
-  in this version, as ``ties`` is: the ranges and the grid route come
-  later.
+  eigenvalue above ``1e-10`` times the largest). On the LP route, with
+  ``CalibrationOptions(ranges=True)``: every identified amount is pinned by
+  the ranges' two-tolerance test, four more linear programs per amount
+  (:mod:`~climada_petals.engine.parametric.solvers`), and
+  :attr:`CalibrationResult.ranges` holds each amount's range over the
+  near-optimal set; without it, None. On a grid: false when another
+  candidate ties with the chosen one (``ties``), else the route's report at
+  that candidate. A design that is not unique is one member of a set of
+  optimal designs.
 * **Degenerate tails** of the weighted CVaR are recorded per design
   problem, not raised: ``"expected_uncovered"`` when the tail holds every
   outcome with a loss (``1 - beta`` at least their weight), so the design
@@ -124,6 +137,14 @@ The objective, the premium and the budget all use the sample's outcome
 measure (:mod:`~climada_petals.engine.parametric.measure`): on an annual
 route the events of a year are summed and the CVaR is a CVaR over years; on
 the event basis the weights are the frequencies, whatever they sum to.
+
+The budget frontier
+-------------------
+:func:`calibrate_frontier` calibrates one template at each of several
+budgets and returns the designs as one table: what another unit of premium
+buys, on the design sample. It is a measurement. Each row is the
+calibration at its budget, solved on its own, and the table names no best
+budget.
 """
 
 from __future__ import annotations
@@ -133,46 +154,32 @@ from collections.abc import Hashable, Mapping, Sequence
 from dataclasses import dataclass
 from functools import partial
 from types import MappingProxyType
-from typing import Any, Final, NamedTuple
+from typing import Any, Final
 
 import numpy as np
 import pandas as pd
 import scipy.sparse as sp
 from numpy.typing import NDArray
 
-from climada_petals.util.config import LOGGER
-
 from ._checks import check_int, check_real
-from .constraints import (
-    FILLS,
-    Budget,
-    UnitAmounts,
-    check_bounded,
-    check_unpaid_at_zero,
-    final_amounts,
-    resolve_limit,
-    resolved_cover,
-    unit_amounts,
+from ._design import (
+    Setup,
+    design_units,
+    record,
+    resolved_design,
+    solve_problems,
+    unidentified,
 )
+from ._problem import CoverProblem, DesignSample
+from .constraints import FILLS, Budget
 from .cover import ParametricCover
-from .errors import ParametricInputError
+from .errors import ParametricError, ParametricInputError
 from .index import ParametricIndex
-from .objectives import MSE, ExpectedUncovered, Objective, WeightedCVaR, tail_degeneracy
+from .objectives import MSE, ExpectedUncovered, Objective, UserObjective, WeightedCVaR
 from .payout import LinearInAmounts
 from .pricing import CostOfCapitalLoad, Pricing, PurePremium
-from .sample import OutcomeSample, SplitRecord
-from .solvers import (
-    LP_METHODS,
-    DesignProblem,
-    QPLimits,
-    Solution,
-    SolverInfo,
-    check_amounts,
-    check_limit,
-    lp_method,
-    solve_design,
-    verify_solution,
-)
+from .sample import OutcomeSample
+from .solvers import LP_METHODS, QPLimits, Settings
 
 __all__ = [
     "DEGENERATE_TAILS",
@@ -183,6 +190,7 @@ __all__ = [
     "CoverProblem",
     "DesignSample",
     "calibrate",
+    "calibrate_frontier",
 ]
 
 SCOPES: Final[tuple[str, ...]] = ("individual", "joint")
@@ -204,8 +212,12 @@ class CalibrationOptions:
     fill : {"lowest", "highest"}, default "lowest"
         The rule that sets unidentified amounts (module docstring).
     ranges : bool, default False
-        Whether to range each amount over the optimal set. Not in this
-        version: True raises.
+        Whether the LP route ranges each identified amount over the
+        near-optimal set, which decides ``unique`` there (module docstring):
+        one more linear program for the optimum and four per amount, each
+        as large as the design problem's own, so on a large joint design
+        the ranges take minutes. The mean squared error's route and the
+        numpy grid have no ranges.
     lp_method : {"auto", "highs", "highs-ipm"}, default "auto"
         The ``linprog`` method of the linear programs: ``"auto"`` takes
         ``"highs"`` for a problem with one unit and ``"highs-ipm"`` for
@@ -226,6 +238,9 @@ class CalibrationOptions:
         The most ``SLSQP`` solves of the mean squared error under a
         cost-of-capital load, each adding a cutting plane, >= 1. Reaching it
         with the premium above the budget raises ``CalibrationLimitError``.
+    max_grid_points : int, default 10_000
+        The most candidates of one design problem on the grid route, >= 1.
+        Above it, ``CalibrationLimitError``, before anything is solved.
 
     Raises
     ------
@@ -240,10 +255,11 @@ class CalibrationOptions:
     time_limit: float | None = None
     max_slsqp_amounts: int = 1_000
     max_cut_rounds: int = 100
+    max_grid_points: int = 10_000
 
     def __post_init__(self) -> None:
         """Validate the options."""
-        for name in ("max_slsqp_amounts", "max_cut_rounds"):
+        for name in ("max_slsqp_amounts", "max_cut_rounds", "max_grid_points"):
             object.__setattr__(self, name, check_int(name, getattr(self, name), low=1))
         if self.fill not in FILLS:
             raise ParametricInputError(
@@ -272,119 +288,18 @@ class CalibrationOptions:
                 check_real("time_limit", self.time_limit, low=0.0, include_low=False),
             )
 
-
-@dataclass(frozen=True)
-class CoverProblem:
-    """The solution of one design problem.
-
-    Attributes
-    ----------
-    problem_id : str
-        The unit id as text (individual scope), or ``"joint"``.
-    unit_id : tuple of str or int
-        The units of the problem.
-    objective_value : float
-        The objective of the resolved cover on the design sample, in loss
-        units (squared for the mean squared error), recomputed with numpy.
-    premium : float
-        The premium of the problem's payout under the design's pricing, on
-        the design sample.
-    expected_loss : float
-        ``E[L]`` of the problem's loss on the design sample.
-    budget_bound : float or None
-        The largest premium the budget allows, or None without a budget.
-    loss_weight : float
-        The weight of the outcomes with a loss: ``P(L > 0)`` on an annual
-        route, the frequency of the events with a loss on the event basis.
-    degenerate_tail : {"expected_uncovered", "single_outcome"} or None
-        The weighted CVaR's degenerate tail (module docstring), else None.
-    solver : SolverInfo
-        Route, solver, version, method, status and time.
-    unique : bool or None, default None
-        Whether the problem's identified amounts are unique (module
-        docstring); None where the route doesn't determine it.
-    """
-
-    problem_id: str
-    unit_id: tuple[Hashable, ...]
-    objective_value: float
-    premium: float
-    expected_loss: float
-    budget_bound: float | None
-    loss_weight: float
-    degenerate_tail: str | None
-    solver: SolverInfo
-    unique: bool | None = None
-
     @property
-    def budget_use(self) -> float | None:
-        """``premium / budget_bound``; None without a budget, NaN for a bound of 0."""
-        if self.budget_bound is None:
-            return None
-        return self.premium / self.budget_bound if self.budget_bound > 0 else np.nan
-
-
-@dataclass(frozen=True, eq=False)
-class DesignSample:
-    """What a design records of its design sample.
-
-    Enough to state the setup of a design, and for
-    :func:`~climada_petals.engine.parametric.sample.check_no_leakage` to
-    compare an evaluation sample with it.
-
-    Attributes
-    ----------
-    basis : {"event", "annual"}
-        What an outcome is.
-    route : {"frequency", "catalogue", "yearsets"}
-        How the outcomes were built.
-    n_years : int or None
-        The years the outcomes stand for; None on the event basis.
-    n_events : int
-        The sample's events.
-    n_draws : int
-        Draws per event.
-    n_outcomes : int
-        The outcomes of the measure.
-    scenario : str
-        The sample's label.
-    event_id : numpy.ndarray of int
-        The sample's events.
-    block : numpy.ndarray
-        Each event's block, the unit a split keeps together.
-    years : numpy.ndarray of int or None
-        The simulation years of a sample on catalogue years; else None.
-    split : SplitRecord or None
-        How the sample was cut from another; None for a whole sample.
-    """
-
-    basis: str
-    route: str
-    n_years: int | None
-    n_events: int
-    n_draws: int
-    n_outcomes: int
-    scenario: str
-    event_id: NDArray[np.int64]
-    block: NDArray[Any]
-    years: NDArray[np.int64] | None
-    split: SplitRecord | None
-
-    @classmethod
-    def from_sample(cls, sample: OutcomeSample) -> DesignSample:
-        """Return the record of a sample."""
-        return cls(
-            basis=sample.kind,
-            route=sample.route,
-            n_years=sample.n_years,
-            n_events=sample.n_events,
-            n_draws=sample.n_draws,
-            n_outcomes=sample.measure.n_outcomes,
-            scenario=sample.scenario,
-            event_id=sample.event_id,
-            block=sample.block,
-            years=sample.years,
-            split=sample.split,
+    def settings(self) -> Settings:
+        """What the design problems read of the options."""
+        return Settings(
+            self.fill,
+            self.ranges,
+            self.lp_method,
+            self.time_limit,
+            QPLimits(
+                self.max_slsqp_amounts, self.max_cut_rounds, self.feasibility_tolerance
+            ),
+            self.max_grid_points,
         )
 
 
@@ -400,7 +315,7 @@ class CalibrationResult:
         terms on any sample (:meth:`ParametricCover.payout_matrix`).
     template_hash : str
         ``definition_hash`` of the template.
-    objective : MSE, ExpectedUncovered or WeightedCVaR
+    objective : MSE, ExpectedUncovered, WeightedCVaR or UserObjective
         What the design minimises; :meth:`summary` holds its document.
     pricing : PurePremium or CostOfCapitalLoad
         The pricing of the premium and the budget.
@@ -415,16 +330,28 @@ class CalibrationResult:
         parameters.
     unidentified : mapping of unit id to tuple of str
         The calibrated amounts that no outcome of the design sample reaches,
-        per unit (module docstring).
+        per unit (module docstring). On the numpy grid the tie rule set
+        them, not the fill rule.
     fill : {"lowest", "highest"}
         The rule that set the unidentified amounts.
     design_sample : DesignSample
         The basis, route, size, events and blocks of the design sample.
     unique : bool or None, default None
         Whether every design problem's identified amounts are unique; None
-        if a route doesn't determine it (the LP route in this version).
+        if a route doesn't determine it (the LP route without
+        ``ranges=True``).
     ties : int or None, default None
-        Grid candidates tied with the best. None: no grid.
+        The grid candidates tied with the chosen ones, summed over the
+        design problems on a grid. None: no grid.
+    profile : pandas.DataFrame or None, default None
+        On a grid, the objective at every candidate: one row per candidate
+        of each design problem on a grid, with ``problem_id``,
+        ``candidate`` (its position in lexicographic order), one column per
+        parameter on the grid, ``objective_value`` and ``premium`` (NaN
+        where the exact route found no feasible amounts), ``status``
+        (``"feasible"``, ``"infeasible"``, ``"above_budget"`` or
+        ``"above_limit"``), ``tied`` (within the tolerance of the best) and
+        ``chosen``. None: no grid.
     """
 
     cover: ParametricCover
@@ -440,6 +367,7 @@ class CalibrationResult:
     design_sample: DesignSample
     unique: bool | None = None
     ties: int | None = None
+    profile: pd.DataFrame | None = None
 
     def __post_init__(self) -> None:
         """Check the scope and store the mappings read-only."""
@@ -499,6 +427,22 @@ class CalibrationResult:
         return self.design_sample.route
 
     @property
+    def ranges(self) -> dict[Hashable, dict[str, tuple[float, float]]] | None:
+        """Each identified amount's range over the near-optimal set, by unit.
+
+        ``{unit_id: {amount: (low, high)}}`` in payout units, from the LP
+        route with ``CalibrationOptions(ranges=True)``; None if no design
+        problem was ranged.
+        """
+        found = [problem.ranges for problem in self.problems]
+        if all(item is None for item in found):
+            return None
+        out: dict[Hashable, dict[str, tuple[float, float]]] = {}
+        for unit, name, low, high in (row for item in found for row in item or ()):
+            out.setdefault(unit, {})[name] = (low, high)
+        return out
+
+    @property
     def degenerate_tail(self) -> dict[str, str | None]:
         """Each design problem's degenerate tail, by ``problem_id``."""
         return {
@@ -551,9 +495,10 @@ class CalibrationResult:
             Columns ``problem_id``, ``scope``, ``objective`` (the document as
             text), ``objective_value``, ``premium``, ``expected_loss``,
             ``budget_bound``, ``budget_use``, ``loss_weight``,
-            ``degenerate_tail``, ``n_unidentified``, ``unique``, ``route``,
-            ``solver``, ``version``, ``method``, ``status``, ``iterations``,
-            ``rounds`` and ``seconds``.
+            ``degenerate_tail``, ``n_unidentified``, ``unique``, ``ties`` and
+            ``n_candidates`` (on a grid, else None), ``route``, ``solver``,
+            ``version``, ``method``, ``status``, ``iterations``, ``rounds``
+            and ``seconds`` (on a grid, the whole grid's).
         """
         rows = []
         for problem in self.problems:
@@ -573,6 +518,8 @@ class CalibrationResult:
                         len(self.unidentified.get(unit, ())) for unit in problem.unit_id
                     ),
                     "unique": problem.unique,
+                    "ties": problem.ties,
+                    "n_candidates": problem.n_candidates,
                     "route": problem.solver.route,
                     "solver": problem.solver.solver,
                     "version": problem.solver.version,
@@ -637,19 +584,7 @@ def _document_text(document: Mapping[str, Any]) -> str:
     return f"{document['kind']}({rest})"
 
 
-class _Setup(NamedTuple):
-    """The checked arguments of one calibration."""
-
-    template: ParametricCover
-    sample: OutcomeSample
-    objective: Objective
-    scope: str
-    pricing: Pricing
-    budget: Budget | None
-    options: CalibrationOptions
-
-
-def _check_types(arguments: _Setup) -> None:
+def _check_types(arguments: Setup) -> None:
     """Raise unless every argument of :func:`calibrate` has its type.
 
     Raises
@@ -663,8 +598,9 @@ def _check_types(arguments: _Setup) -> None:
         (
             "objective",
             arguments.objective,
-            MSE | ExpectedUncovered | WeightedCVaR,
-            "MSE(), ExpectedUncovered() or WeightedCVaR(alpha, beta)",
+            MSE | ExpectedUncovered | WeightedCVaR | UserObjective,
+            "MSE(), ExpectedUncovered(), WeightedCVaR(alpha, beta) or a "
+            "UserObjective",
         ),
         (
             "pricing",
@@ -672,7 +608,6 @@ def _check_types(arguments: _Setup) -> None:
             PurePremium | CostOfCapitalLoad,
             "PurePremium() or CostOfCapitalLoad(rate, q)",
         ),
-        ("options", arguments.options, CalibrationOptions, "CalibrationOptions"),
     ]
     for name, value, kind, text in checks:
         if not isinstance(value, kind):
@@ -688,15 +623,14 @@ def _check_types(arguments: _Setup) -> None:
         )
 
 
-def _check_arguments(arguments: _Setup) -> None:
+def _check_arguments(arguments: Setup) -> None:
     """Raise unless the arguments of :func:`calibrate` fit together.
 
     Raises
     ------
     ParametricInputError
-        If an argument is invalid, the sample is not on the template's
-        index definition and units, or the options ask for a route this
-        version doesn't have.
+        If an argument is invalid, or the sample is not on the template's
+        index definition and units.
     """
     _check_types(arguments)
     template, sample = arguments.template, arguments.sample
@@ -712,155 +646,19 @@ def _check_arguments(arguments: _Setup) -> None:
         )
     if arguments.budget is not None:
         arguments.budget.check(arguments.scope, sample.unit_id)
-    options = arguments.options
-    if options.ranges:
-        raise ParametricInputError(
-            "ranges=True ranges each amount over the optimal set, which this "
-            "version doesn't do yet"
-        )
 
 
-def _problems(scope: str, units: Sequence[UnitAmounts]) -> list[tuple[str, list[int]]]:
-    """Return ``(problem_id, unit positions)`` for each design problem."""
-    if scope == JOINT:
-        return [(JOINT, list(range(len(units))))]
-    return [(str(unit.unit_id), [position]) for position, unit in enumerate(units)]
-
-
-def _bound(setup: _Setup, unit_id: tuple[Hashable, ...], loss: Any) -> float | None:
-    """Return a problem's budget bound, or None."""
-    if setup.budget is None:
-        return None
-    return setup.budget.bound(unit_id, setup.sample.measure.expectation(loss))
-
-
-def _log(problem: CoverProblem, objective: Objective) -> None:
-    """Log a solved design problem, and warn when its tail degenerates."""
-    LOGGER.info(
-        "design problem %r: %s = %.6g, premium %.6g (%s, %s, %.2f s)",
-        problem.problem_id,
-        objective.name,
-        problem.objective_value,
-        problem.premium,
-        problem.solver.solver,
-        problem.solver.method,
-        problem.solver.seconds,
-    )
-    if problem.degenerate_tail == "expected_uncovered":
-        LOGGER.warning(
-            "design problem %r: 1 - beta = %.4g is at least the weight of the "
-            "outcomes with a loss, %.4g, so the weighted-CVaR design minimises "
-            "E[U] only",
-            problem.problem_id,
-            1.0 - getattr(objective, "beta", 0.0),
-            problem.loss_weight,
-        )
-    if problem.degenerate_tail == "single_outcome":
-        LOGGER.warning(
-            "design problem %r: 1 - beta is at most the smallest weight of an "
-            "outcome with a loss, so the CVaR is the single worst outcome",
-            problem.problem_id,
-        )
-
-
-class _Solved(NamedTuple):
-    """A solved design problem: its data, its units' positions and the solution."""
-
-    problem: DesignProblem
-    positions: list[int]
-    solution: Solution
-
-
-def _solve(
-    setup: _Setup, units: Sequence[UnitAmounts]
-) -> tuple[list[_Solved], dict[Hashable, NDArray[np.float64]]]:
-    """Solve every design problem; return them and each unit's final amounts."""
+def _design(setup: Setup) -> CalibrationResult:
+    """Solve every design problem of a checked calibration (:mod:`._design`)."""
+    units = design_units(setup)
+    solved = solve_problems(setup, units)
+    cover = resolved_design(setup, units, solved)
     sample = setup.sample
-    loss = sp.csc_matrix(sample.loss)
-    solved = []
-    amounts: dict[Hashable, NDArray[np.float64]] = {}
-    for problem_id, positions in _problems(setup.scope, units):
-        members = [units[position] for position in positions]
-        problem_loss = np.asarray(loss[:, positions].sum(axis=1)).reshape(-1)
-        problem = DesignProblem(
-            problem_id=problem_id,
-            basis=sp.hstack([unit.basis for unit in members], format="csr"),
-            loss=problem_loss,
-            constraints=[unit.constraints for unit in members],
-            measure=sample.measure,
-            bound=_bound(setup, tuple(unit.unit_id for unit in members), problem_loss),
-        )
-        solution = solve_design(
-            problem,
-            setup.objective,
-            setup.pricing,
-            method=lp_method(setup.options.lp_method, len(members)),
-            time_limit=setup.options.time_limit,
-            limits=QPLimits(
-                setup.options.max_slsqp_amounts,
-                setup.options.max_cut_rounds,
-                setup.options.feasibility_tolerance,
-            ),
-        )
-        check_amounts(problem, solution.amounts, setup.options.feasibility_tolerance)
-        amounts.update(final_amounts(members, solution.amounts, setup.options.fill))
-        solved.append(_Solved(problem, positions, solution))
-    return solved, amounts
-
-
-def _record(
-    setup: _Setup,
-    solved: _Solved,
-    paid: NDArray[np.float64],
-    cover: ParametricCover,
-) -> CoverProblem:
-    """Check one solved problem on the resolved cover; return its record.
-
-    ``paid`` is the cover's payout per row and unit of the sample.
-    """
-    problem, positions, solution = solved
-    unit_id = tuple(cover.unit_id[p] for p in positions)
-    caps = [None if cover.limit is None else cover.limit.amount_of(u) for u in unit_id]
-    tolerance = setup.options.feasibility_tolerance
-    check_limit(problem, paid[:, positions], caps, tolerance)
-    value, premium = verify_solution(
-        problem,
-        paid[:, positions],
-        objective=setup.objective,
-        pricing=setup.pricing,
-        solution=solution,
-        tolerance=tolerance,
-    )
-    weight, degenerate = tail_degeneracy(setup.objective, problem.loss, problem.measure)
-    record = CoverProblem(
-        problem_id=problem.problem_id,
-        unit_id=unit_id,
-        objective_value=value,
-        premium=premium,
-        expected_loss=problem.measure.expectation(problem.loss),
-        budget_bound=problem.bound,
-        loss_weight=weight,
-        degenerate_tail=degenerate,
-        solver=solution.info,
-        unique=solution.unique,
-    )
-    _log(record, setup.objective)
-    return record
-
-
-def _design(setup: _Setup) -> CalibrationResult:
-    """Solve every design problem of a checked calibration."""
-    sample = setup.sample
-    limit = resolve_limit(setup.template.limit, sample.unit_id, sample.loss)
-    units = unit_amounts(setup.template, sample, scope=setup.scope, limit=limit)
-    if setup.budget is None and not isinstance(setup.objective, MSE):
-        check_bounded(units, setup.objective.name)
-    check_unpaid_at_zero(sample, units)
-    solved, amounts = _solve(setup, units)
-    cover = resolved_cover(setup.template, units, amounts, limit)
     paid = cover.payout_matrix(sample.index)[sample.event_row]
-    problems = tuple(_record(setup, item, paid, cover) for item in solved)
+    problems = tuple(record(setup, item, paid, cover) for item in solved)
     flags = [problem.unique for problem in problems]
+    ties = [problem.ties for problem in problems if problem.ties is not None]
+    profiles = [item.grid.profile for item in solved if item.grid is not None]
     return CalibrationResult(
         cover=cover,
         template_hash=setup.template.definition_hash,
@@ -870,13 +668,15 @@ def _design(setup: _Setup) -> CalibrationResult:
         scope=setup.scope,
         problems=problems,
         calibrated={
-            unit.unit_id: setup.template.payout[unit.unit_id].free_parameters()
-            for unit in units
+            unit: setup.template.payout[unit].free_parameters()
+            for unit in sample.unit_id
         },
-        unidentified={unit.unit_id: unit.unidentified_names for unit in units},
-        fill=setup.options.fill,
+        unidentified=unidentified(units, solved, sample.unit_id),
+        fill=setup.settings.fill,
         design_sample=DesignSample.from_sample(sample),
         unique=None if None in flags else all(flags),
+        ties=sum(ties) if ties else None,
+        profile=pd.concat(profiles, ignore_index=True) if profiles else None,
     )
 
 
@@ -895,15 +695,17 @@ def calibrate(
     Parameters
     ----------
     template : ParametricCover
-        The cover to design: its free amounts are calibrated. Every payout is
-        linear in its amounts, with its shape parameters fixed, in this
-        version. Its limit, if any, bounds every amount;
-        ``Limit.largest_loss()`` is resolved on ``sample``.
+        The cover to design: its free parameters are calibrated. Free
+        amounts of a payout linear in its amounts are solved for exactly;
+        free shape parameters, the parameters of another payout and those
+        of a ``UserObjective`` design are searched on their grids, in the
+        individual scope (module docstring). Its limit, if any, bounds every
+        payout; ``Limit.largest_loss()`` is resolved on ``sample``.
     sample : OutcomeSample
         The design sample, on the template's index definition and units,
         e.g. the training side of
         :func:`~climada_petals.engine.parametric.sample.holdout`.
-    objective : MSE, ExpectedUncovered or WeightedCVaR
+    objective : MSE, ExpectedUncovered, WeightedCVaR or UserObjective
         What the design minimises.
     scope : {"individual", "joint"}
         One design problem per unit, or one on the owner's total. Required.
@@ -913,29 +715,33 @@ def calibrate(
         The premium budget of each design problem. Default: none, which
         ``E[U]`` and the weighted CVaR accept only with bounded amounts.
     options : CalibrationOptions, default CalibrationOptions()
-        The fill rule, the LP method, the tolerance and the time limit.
+        The fill rule, the ranges, the LP method, the tolerance, the time
+        limit and the size limits.
 
     Returns
     -------
     CalibrationResult
         The resolved cover, one :class:`CoverProblem` per design problem,
-        the unidentified amounts and the design sample's record.
+        the unidentified amounts, the ranges and the grid's profile where
+        there are, and the design sample's record.
 
     Raises
     ------
     ParametricInputError
-        If an argument is invalid or the arguments don't fit together, a
-        route this version doesn't have is needed (module docstring), a
-        linear objective has neither a budget nor bounded amounts, or the
-        sample left events out and a payout may pay at an index of 0
+        If an argument is invalid or the arguments don't fit together, the
+        grid route is needed in the joint scope or for a free parameter
+        without a grid, a linear objective has neither a budget nor bounded
+        amounts, or the sample left events out and a payout may pay at an
+        index of 0
         (:func:`~climada_petals.engine.parametric.sample.check_left_out_unpaid`).
     CoverDefinitionError
         If a fixed amount is above its unit's limit.
     CalibrationError
         If a design problem is not solved to optimality, or its solution
-        fails a check: :class:`InfeasibleCalibrationError`,
-        :class:`UnboundedCalibrationError`, :class:`CalibrationLimitError`
-        (``time_limit``, ``max_slsqp_amounts``, ``max_cut_rounds`` or a
+        fails a check: :class:`InfeasibleCalibrationError` (on a grid: no
+        feasible candidate), :class:`UnboundedCalibrationError`,
+        :class:`CalibrationLimitError` (``time_limit``,
+        ``max_slsqp_amounts``, ``max_cut_rounds``, ``max_grid_points`` or a
         solver's iteration limit) or the base class. No problem is skipped.
 
     Examples
@@ -958,6 +764,159 @@ def calibrate(
     ... )
     >>> result.cover.write_json("cover.json")  # doctest: +SKIP
     """
-    setup = _Setup(template, sample, objective, scope, pricing, budget, options)
+    if not isinstance(options, CalibrationOptions):
+        raise ParametricInputError(
+            f"options must be CalibrationOptions, got {options!r}"
+        )
+    setup = Setup(template, sample, objective, scope, pricing, budget, options.settings)
     _check_arguments(setup)
     return _design(setup)
+
+
+def _frontier_budgets(budgets: object) -> list[Budget]:
+    """Return the frontier's budgets as a list, checked.
+
+    Raises
+    ------
+    ParametricInputError
+        If ``budgets`` is not a non-empty sequence of distinct budgets.
+    """
+    if isinstance(budgets, Budget | str) or not isinstance(budgets, Sequence):
+        raise ParametricInputError(
+            f"budgets must be a sequence of Budget, got {budgets!r}"
+        )
+    found = list(budgets)
+    if not found or not all(isinstance(budget, Budget) for budget in found):
+        raise ParametricInputError(
+            f"budgets must be a non-empty sequence of Budget, got {found!r}"
+        )
+    repeated = [b for k, b in enumerate(found) if b in found[:k]]
+    if repeated:
+        raise ParametricInputError(
+            f"budgets must be distinct, got {repeated[0]!r} twice: two rows would "
+            "hold the same design"
+        )
+    return found
+
+
+def _frontier_rows(result: CalibrationResult, budget: Budget) -> pd.DataFrame:
+    """Return a design's rows of the frontier: budget, summary and parameters."""
+    rows = []
+    for problem in result.problems:
+        amount = (
+            budget.amount[problem.unit_id[0]]
+            if isinstance(budget.amount, Mapping)
+            else budget.amount
+        )
+        row: dict[str, Any] = {
+            "budget_ratio": np.nan if budget.ratio is None else budget.ratio,
+            "budget_amount": np.nan if amount is None else amount,
+        }
+        for unit in problem.unit_id:
+            parameters = result.cover.payout[unit].parameters()
+            row.update(
+                (f"{unit}:{name}", float(value)) for name, value in parameters.items()
+            )
+        rows.append(row)
+    found = pd.DataFrame(rows)
+    return pd.concat([found.iloc[:, :2], result.summary(), found.iloc[:, 2:]], axis=1)
+
+
+def calibrate_frontier(
+    template: ParametricCover,
+    sample: OutcomeSample,
+    objective: Objective,
+    *,
+    budgets: Sequence[Budget],
+    scope: str,
+    pricing: Pricing = PurePremium(),  # frozen, so safe to share
+    options: CalibrationOptions = CalibrationOptions(),  # frozen, so safe to share
+) -> pd.DataFrame:
+    """Calibrate a template at each of several budgets; return the designs as one table.
+
+    The budget frontier: what another unit of premium buys, on the design
+    sample. Each budget's design is
+    ``calibrate(template, sample, objective, scope=scope, pricing=pricing,
+    budget=budget, options=options)``, solved on its own, so a row doesn't
+    depend on the other budgets or on their order. It is a measurement: the
+    table has no best point, no rank and no ordering by a metric, and a
+    reader takes differences between rows. Rows follow the order of
+    ``budgets``. The objective values and premiums are on the design
+    sample: evaluate each design on another sample
+    (:func:`~climada_petals.engine.parametric.evaluate.evaluate`) for
+    out-of-sample numbers.
+
+    Each design's non-uniqueness is in its rows (``unique``, ``ties``,
+    ``n_unidentified``): where a design is not unique, its amounts are one
+    member of a set of optimal designs, and they may jump between
+    neighbouring budgets. ``CalibrationOptions(ranges=True)`` ranges every
+    budget's amounts on the LP route. Each budget of the mean squared error
+    is one ``SLSQP`` solve, with cutting planes under a load, within the
+    stated limits.
+
+    Parameters
+    ----------
+    template : ParametricCover
+        The cover to design, as for :func:`calibrate`.
+    sample : OutcomeSample
+        The design sample.
+    objective : MSE, ExpectedUncovered, WeightedCVaR or UserObjective
+        What every design minimises.
+    budgets : sequence of Budget
+        The budgets, distinct, at least one. Keyword-only.
+    scope : {"individual", "joint"}
+        As for :func:`calibrate`. Required.
+    pricing : PurePremium or CostOfCapitalLoad, default PurePremium()
+        The premium the budgets bound.
+    options : CalibrationOptions, default CalibrationOptions()
+        As for :func:`calibrate`, for every budget.
+
+    Returns
+    -------
+    pandas.DataFrame
+        One row per design problem of each budget's design (one per unit,
+        or one for the joint scope), budget by budget: ``budget_ratio`` and
+        ``budget_amount`` (the budget as stated, the other NaN; an amount by
+        unit gives the row's unit's amount), the columns of
+        :meth:`CalibrationResult.summary`, and every parameter of the
+        problem's units in the resolved cover, as ``"<unit_id>:<name>"``
+        (e.g. ``"parish_1:levels[0]"``; NaN on the rows of other units).
+
+    Raises
+    ------
+    ParametricInputError
+        If ``budgets`` is not a non-empty sequence of distinct budgets, or
+        as :func:`calibrate`.
+    CalibrationError
+        As :func:`calibrate`, at a budget the template can't meet, for
+        example: no budget's row is dropped. The error's notes name the
+        budget.
+
+    Examples
+    --------
+    >>> frontier = calibrate_frontier(  # doctest: +SKIP
+    ...     template,
+    ...     train,
+    ...     WeightedCVaR(alpha=0.9, beta=0.99),
+    ...     budgets=[Budget(ratio=r) for r in (0.5, 1.0, 1.5)],
+    ...     scope="individual",
+    ... )
+    >>> frontier[["budget_ratio", "problem_id", "objective_value", "premium"]]  # doctest: +SKIP
+    """
+    frames = []
+    for budget in _frontier_budgets(budgets):
+        try:
+            result = calibrate(
+                template,
+                sample,
+                objective,
+                scope=scope,
+                pricing=pricing,
+                budget=budget,
+                options=options,
+            )
+        except ParametricError as error:
+            error.add_note(f"raised by calibrate_frontier at {budget!r}")
+            raise
+        frames.append(_frontier_rows(result, budget))
+    return pd.concat(frames, ignore_index=True)

@@ -47,6 +47,7 @@ from climada_petals.engine.parametric.constraints import (
     check_unpaid_at_zero,
     fill_amounts,
     final_amounts,
+    payout_at_zero,
     resolve_limit,
     resolved_cover,
     snap_amounts,
@@ -224,6 +225,34 @@ class TestUnitAmounts(unittest.TestCase):
         self.assertEqual(resolved.limit, Limit({"U0": 6.0, "U1": 9.0}))
         self.assertEqual(resolved.payout["U1"].levels, (1.0, 8.0))
 
+    def test_some_units_and_the_others_set_by_name(self) -> None:
+        # The second unit alone on the exact route, the first set by name, as
+        # the grid route sets a unit's parameters.
+        payouts = {
+            "U0": StepPayout([Free(20.0, 30.0, grid=2), 45.0], [Free(), Free()]),
+            "U1": StepPayout.uniform(20.0, 70.0, 2),
+        }
+        cover = template(self.sample, payouts, limit=None)
+        (unit,) = unit_amounts(
+            cover, self.sample, scope="individual", limit=None, positions=[1]
+        )
+        self.assertEqual(unit.unit_id, "U1")
+        others = {"U0": {"breakpoints[0]": 30.0, "levels[0]": 2.0, "levels[1]": 3.0}}
+        resolved = resolved_cover(
+            cover, [unit], {"U1": np.array([1.0, 8.0])}, None, others
+        )
+        self.assertEqual(resolved.payout["U0"].breakpoints, (30.0, 45.0))
+        self.assertEqual(resolved.payout["U1"].levels, (1.0, 8.0))
+
+    def test_what_a_payout_may_pay_at_zero(self) -> None:
+        # The first step from 0 pays its level at 0; a free level counts at
+        # its upper bound, or at 1 without one.
+        payout = StepPayout.uniform(0.0, 70.0, 2)
+        self.assertEqual(payout_at_zero(payout, payout.amount_constraints(6.0)), 6.0)
+        self.assertEqual(payout_at_zero(payout, payout.amount_constraints()), 1.0)
+        above = StepPayout.uniform(20.0, 70.0, 2)
+        self.assertEqual(payout_at_zero(above, above.amount_constraints()), 0.0)
+
     def test_fixed_amounts_are_not_calibrated(self) -> None:
         payout = BinaryPayout(trigger=28.0, amount=Free())
         fixed = LinearPayout(attachment=20.0, exhaustion=70.0, limit=2.0)
@@ -235,7 +264,9 @@ class TestUnitAmounts(unittest.TestCase):
             check_bounded(units, "expected_uncovered")
         check_bounded(units[1:], "expected_uncovered")
 
-    def test_routes_this_version_does_not_have_raise(self) -> None:
+    def test_what_the_exact_route_does_not_take_raises(self) -> None:
+        # The calibration takes the first two on the grid route instead, in
+        # the individual scope.
         free_threshold = StepPayout([20.0, Free(30.0, 50.0, grid=3)], [Free(), Free()])
         cases = [
             (_Square(1.0), "individual", "not linear in its amounts"),
