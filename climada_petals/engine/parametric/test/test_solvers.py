@@ -206,14 +206,20 @@ class TestMeanSquaredErrorRoute(unittest.TestCase):
         )
 
     def test_the_cuts_reach_the_exact_loaded_design(self) -> None:
-        for bound in (0.2, 0.5, 1.0):
-            problem = _problem(bound=bound)
+        problems = [_problem(bound=bound) for bound in (0.2, 0.5, 1.0)]
+        problems += [_one_unit(bound) for bound in (0.4, 0.8)]
+        for problem in problems:
             solution = solve_design(problem, MSE(), LOAD, method="highs")
             exact = _exact_loaded(problem, LOAD)
-            with self.subTest(bound=bound):
+            with self.subTest(problem=problem.problem_id, bound=problem.bound):
                 self.assertTrue(exact.success, exact.message)
                 self.assertAlmostEqual(solution.objective_value, exact.fun, delta=1e-8)
                 self.assertGreaterEqual(solution.info.rounds or 0, 1)
+                if solution.unique:
+                    # One unit's two levels are unique; two units' are not.
+                    np.testing.assert_allclose(
+                        solution.amounts, exact.x[:2], atol=1e-6 * problem.scale
+                    )
 
     def test_fixed_amounts_are_constants(self) -> None:
         # The fixed levels alone cost 0.7 * 1.5 + 0.3 * 10 = 4.05 under the load.
@@ -370,6 +376,7 @@ class TestMeanSquaredErrorDesigns(unittest.TestCase):
         cases = {
             "max_slsqp_amounts": CalibrationOptions(max_slsqp_amounts=4),
             "max_cut_rounds": CalibrationOptions(max_cut_rounds=1),
+            "time_limit": CalibrationOptions(time_limit=1e-9),
         }
         for name, options in cases.items():
             with (

@@ -212,7 +212,8 @@ class CalibrationOptions:
         several. The method used is recorded per design problem.
     feasibility_tolerance : float, default 1e-7
         The relative tolerance of the checks after the solve (module
-        docstring), > 0.
+        docstring), and within which the cutting planes of the mean squared
+        error bring the loaded premium to the budget, > 0.
     time_limit : float, optional
         Seconds each linear program, or each mean squared error's design
         problem with all its rounds, may take; reaching it raises

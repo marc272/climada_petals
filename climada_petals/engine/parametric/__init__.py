@@ -62,8 +62,8 @@ from CLIMADA's ``Hazard``, ``TCTracks``, ``Exposures`` and ``Impact``:
   ``alpha CVaR_beta(U) + (1 - alpha) E[U]`` of the uncovered loss ``U``,
   next to :class:`ExpectedUncovered` (``E[U]``) and :class:`MSE`. The first
   two are linear programs solved with scipy's HiGHS; the mean squared error
-  is a quadratic program and needs the optional dependency cvxpy in this
-  version.
+  is a quadratic program solved with scipy's ``SLSQP``, within stated
+  limits.
 * **Calibration:** :func:`calibrate` chooses the free amounts of a template
   cover on a design sample, with ``scope="individual"`` (one design problem
   per unit) or ``scope="joint"`` (one problem on the owner's total loss, so
@@ -84,8 +84,7 @@ from CLIMADA's ``Hazard``, ``TCTracks``, ``Exposures`` and ``Impact``:
   on them. Plots: :func:`plot_payout`, :func:`plot_payout_vs_loss` and
   :func:`plot_exceedance`.
 
-The module depends only on CLIMADA, numpy, scipy, pandas and matplotlib,
-plus cvxpy for the mean squared error in this version.
+The module depends only on CLIMADA, numpy, scipy, pandas and matplotlib.
 """
 
 from .annual import CatalogueYears, YearSets, sample_years

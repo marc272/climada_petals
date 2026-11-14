@@ -92,8 +92,10 @@ SLSQP_OPTIONS: Final[dict[str, Any]] = {"ftol": 1e-12, "maxiter": 3_000}
 
 ``ftol`` bounds, among others, the change of the scaled objective, which is
 at most 1 at the optimum, and the constraints' violation in a converged
-solve; its default, ``1e-6``, leaves designs up to about ``1e-6`` away from
-the optimum. ``maxiter`` is ``SLSQP``'s iteration limit per solve."""
+solve. Its default, ``1e-6``, leaves designs up to about ``1e-6`` away from
+the optimum; at ``1e-13``, solves with many nearly parallel cuts sometimes
+end in a failed line search at a point within ``1e-11`` of their cut.
+``maxiter`` is ``SLSQP``'s iteration limit per solve."""
 
 UNIQUE_RTOL: Final[float] = 1e-10
 """The uniqueness test's relative tolerance on the Hessian's eigenvalues."""
@@ -161,11 +163,21 @@ class _Quadratic:
     def value_and_gradient(
         self, values: NDArray[np.float64]
     ) -> tuple[float, NDArray[np.float64]]:
-        """Return ``f`` and its gradient at the solver's variables ``values``."""
+        """Return ``f`` and its gradient at the solver's variables ``values``.
+
+        Raises
+        ------
+        CalibrationLimitError
+            Once the time limit is reached.
+        """
         self.deadline.check()
-        residual = self.target - self.design @ values
+        residual = self.residual(values)
         weighted = self.weights * residual
         return float(weighted @ residual), -2.0 * (self.design.T @ weighted)
+
+    def residual(self, values: NDArray[np.float64]) -> NDArray[np.float64]:
+        """Return ``l_o - A_o theta`` per outcome at the solver's variables."""
+        return np.asarray(self.target - self.design @ values, dtype=np.float64)
 
     def amounts(self, values: NDArray[np.float64]) -> NDArray[np.float64]:
         """Return every amount, the fixed ones at their value."""
@@ -198,9 +210,8 @@ class _Budget:
         self.measure = problem.measure
         self.pricing = pricing
         self.bound = None if problem.bound is None else problem.bound / problem.scale
-        self.load = (
-            pricing if isinstance(pricing, CostOfCapitalLoad) and pricing.rate else None
-        )
+        loaded = isinstance(pricing, CostOfCapitalLoad) and pricing.rate > 0.0
+        self.load = pricing if loaded else None
 
     def row(
         self, quadratic: _Quadratic, theta: NDArray[np.float64]
@@ -375,9 +386,10 @@ def solve_mse(
         Above ``max_slsqp_amounts``, after ``max_cut_rounds``, at
         ``time_limit`` or at ``SLSQP``'s iteration limit.
     InfeasibleCalibrationError
-        If ``SLSQP`` finds the constraints incompatible.
+        If ``SLSQP`` fails and HiGHS finds no point that meets the rows and
+        bounds.
     CalibrationError
-        If ``SLSQP`` ends for another reason.
+        If ``SLSQP`` fails for another reason.
     """
     start = time.perf_counter()
     arr = problem.scaled()
@@ -411,7 +423,7 @@ def solve_mse(
         seconds=time.perf_counter() - start,
         rounds=len(results),
     )
-    value = quadratic.value_and_gradient(values)[0]
+    value = float(quadratic.weights @ quadratic.residual(values) ** 2)
     return Solution(
         quadratic.amounts(values) * problem.scale,
         value * norm * problem.scale**2,
