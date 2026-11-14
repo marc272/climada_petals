@@ -21,7 +21,7 @@ Cat-in-a-circle index from tropical cyclone tracks, and its track geometry.
 :func:`cat_in_circle` computes the index that
 :meth:`~climada_petals.engine.parametric.index.ParametricIndex.from_cat_in_circle`
 builds: the highest Saffir-Simpson category that a storm's track reaches
-within ``radius_km`` of the exposure point. It reads the tracks, not the wind
+within ``radius_km`` of an insured unit. It reads the tracks, not the wind
 field that drives the loss, so index and loss are decoupled as in a real
 contract. Steinmann et al. (2023, Environment Systems and Decisions
 43:555-568) build such products in CLIMADA, with radii of 10 to 50 km.
@@ -35,9 +35,12 @@ Cat-in-a-circle, per storm and exposure point:
 2. Keep the points within ``radius_km`` of the exposure point (haversine
    distance on a sphere of 6,371 km, inclusive).
 3. Take the highest wind of those points, or 0 if there are none.
-4. ``metric="category"``: the number of breakpoints this wind reaches, 0 to
-   5 on the Saffir-Simpson scale. ``metric="max_wind"``: the wind itself,
-   in m/s.
+
+A unit's wind is the highest over its points, so a group of points reads
+the track within ``radius_km`` of any of them: its ``index_stat`` is
+``"max"``. Then ``metric="category"`` gives the number of breakpoints this
+wind reaches, 0 to 5 on the Saffir-Simpson scale, and ``metric="max_wind"``
+the wind itself, in m/s.
 
 The default breakpoints, :data:`SAFFIR_SIMPSON_KN`, are the NHC lower bounds
 of categories 1 to 5 in knots of 1-minute sustained wind, the values of
@@ -49,27 +52,36 @@ from __future__ import annotations
 
 import itertools
 import math
-from collections.abc import Sequence
-from typing import Any, Final, Literal
+from collections.abc import Mapping, Sequence
+from typing import TYPE_CHECKING, Any, Final, Literal
 
 import numpy as np
 from numpy.typing import NDArray
 
 from ._checks import check_real
+from .cover import IndexDefinition
 from .errors import ParametricInputError
 
+if TYPE_CHECKING:
+    from .units import InsuredUnits
+
 __all__ = [
+    "CAT_IN_CIRCLE",
     "DEFAULT_TRACK_STEP_HOURS",
     "EARTH_RADIUS_KM",
     "MS_TO_KN",
     "SAFFIR_SIMPSON_KN",
     "Metric",
     "cat_in_circle",
+    "cat_in_circle_arguments",
     "category_of",
     "densify_track",
     "haversine_km",
     "max_wind_within_radius",
 ]
+
+CAT_IN_CIRCLE: Final[str] = "cat_in_circle"
+"""The ``kind`` of a cat-in-a-circle :class:`IndexDefinition`."""
 
 SAFFIR_SIMPSON_KN: Final[tuple[float, ...]] = (64.0, 83.0, 96.0, 113.0, 137.0)
 """Lower bounds of Saffir-Simpson categories 1-5, 1-minute sustained wind, kn."""
@@ -86,18 +98,22 @@ DEFAULT_TRACK_STEP_HOURS: Final[float] = 0.5
 Metric = Literal["category", "max_wind"]
 """What the cat-in-a-circle index reports: the category or the wind."""
 
+_PARAMETERS: Final[frozenset[str]] = frozenset(
+    {"breakpoints_kn", "metric", "radius_km", "track_step_hours"}
+)
+
 
 def cat_in_circle(
     tracks: Any,
-    exposures: Any,
+    units: InsuredUnits,
     hazard: Any,
     *,
     radius_km: float,
     metric: Metric = "category",
     breakpoints_kn: Sequence[float] = SAFFIR_SIMPSON_KN,
     track_step_hours: float | None = DEFAULT_TRACK_STEP_HOURS,
-) -> tuple[NDArray[np.float64], str, str]:
-    """Return the cat-in-a-circle index of every hazard event and exposure point.
+) -> tuple[NDArray[np.float64], IndexDefinition]:
+    """Return the cat-in-a-circle index of every hazard event and insured unit.
 
     Parameters
     ----------
@@ -105,8 +121,8 @@ def cat_in_circle(
         The storms' tracks, wind in knots. Every hazard event needs
         exactly one track whose ``sid`` is the event's name (as
         ``TropCyclone.from_tracks`` names its events).
-    exposures : climada.entity.Exposures
-        One point per insured unit.
+    units : InsuredUnits
+        The insured units; a unit reads the track near any of its points.
     hazard : climada.hazard.Hazard
         Sets the events and their order.
     radius_km : float
@@ -123,11 +139,11 @@ def cat_in_circle(
     Returns
     -------
     values : numpy.ndarray
-        The index, shape ``(n_events, n_points)``, in categories or m/s.
-    unit : str
-        The unit of the values.
-    definition : str
-        What the index is, in words.
+        The index, shape ``(n_events, n_units)``, in categories or m/s.
+    definition : IndexDefinition
+        Kind ``"cat_in_circle"``, ``index_stat="max"``, and the arguments
+        above as ``parameters`` (``breakpoints_kn`` with ``"category"``
+        only).
 
     Raises
     ------
@@ -138,26 +154,83 @@ def cat_in_circle(
     radius, bounds = _check_parameters(
         radius_km, metric, breakpoints_kn, track_step_hours
     )
-    wind_kn = _max_wind_kn(tracks, exposures, hazard, radius, track_step_hours)
-    step = (
-        "the track points as given"
-        if track_step_hours is None
-        else f"the track interpolated to {track_step_hours:g} h steps"
+    unit_wind = _unit_wind(
+        tracks, units, hazard, radius=radius, track_step_hours=track_step_hours
     )
-    head = (
-        f"cat_in_circle(r={radius:g} km, metric={metric}): from {step}, the "
-        f"points within {radius:g} km of the exposure point (haversine, "
-        f"sphere of {EARTH_RADIUS_KM:g} km), the highest maximum sustained "
-        "wind"
-    )
+    parameters: dict[str, Any] = {
+        "metric": metric,
+        "radius_km": radius,
+        "track_step_hours": (
+            None if track_step_hours is None else float(track_step_hours)
+        ),
+    }
     if metric == "category":
-        saffir = bounds == SAFFIR_SIMPSON_KN
-        unit = "Saffir-Simpson category" if saffir else "category"
-        definition = (
-            f"{head}, as the number of breakpoints {list(bounds)} kn it reaches"
+        parameters["breakpoints_kn"] = list(bounds)
+        unit = "Saffir-Simpson category" if bounds == SAFFIR_SIMPSON_KN else "category"
+        values = category_of(unit_wind, bounds)
+    else:
+        unit, values = "m/s", unit_wind / MS_TO_KN
+    definition = IndexDefinition(
+        CAT_IN_CIRCLE, unit=unit, index_stat="max", parameters=parameters
+    )
+    return values, definition
+
+
+def _unit_wind(
+    tracks: Any,
+    units: InsuredUnits,
+    hazard: Any,
+    *,
+    radius: float,
+    track_step_hours: float | None,
+) -> NDArray[np.float64]:
+    """Return the highest wind within the radius of each unit's points, in kn.
+
+    Each distinct location of a point in a unit is read once.
+    """
+    unit_of = units.point_unit
+    inside = np.flatnonzero(unit_of >= 0)
+    order = inside[np.argsort(unit_of[inside], kind="stable")]
+    locations, location_of = np.unique(units.coords[order], axis=0, return_inverse=True)
+    wind_kn = _max_wind_kn(
+        tracks, hazard, locations, radius=radius, track_step_hours=track_step_hours
+    )
+    starts = np.searchsorted(unit_of[order], np.arange(units.n_units))
+    return np.maximum.reduceat(
+        wind_kn[:, np.asarray(location_of).reshape(-1)], starts, axis=1
+    )
+
+
+def cat_in_circle_arguments(definition: IndexDefinition) -> dict[str, Any]:
+    """Return the arguments of :func:`cat_in_circle` that a definition states.
+
+    Parameters
+    ----------
+    definition : IndexDefinition
+        A definition of kind ``"cat_in_circle"``.
+
+    Returns
+    -------
+    dict
+        ``radius_km``, ``metric``, ``track_step_hours`` and, for
+        ``"category"``, ``breakpoints_kn``.
+
+    Raises
+    ------
+    ParametricInputError
+        If the definition is of another kind, or its parameters are not
+        the ones :func:`cat_in_circle` states.
+    """
+    parameters: Mapping[str, Any] = definition.parameters or {}
+    names = set(parameters)
+    needed = {"metric", "radius_km", "track_step_hours"}
+    if definition.kind != CAT_IN_CIRCLE or not needed <= names <= _PARAMETERS:
+        raise ParametricInputError(
+            f"a cat-in-a-circle definition has kind {CAT_IN_CIRCLE!r} and the "
+            f"parameters {sorted(needed)}, and breakpoints_kn for the category; "
+            f"got kind {definition.kind!r} and {sorted(names)}"
         )
-        return category_of(wind_kn, bounds), unit, definition
-    return wind_kn / MS_TO_KN, "m/s", f"{head}, in m/s"
+    return {name: parameters[name] for name in names}
 
 
 def _check_parameters(
@@ -195,12 +268,13 @@ def _check_parameters(
 
 def _max_wind_kn(
     tracks: Any,
-    exposures: Any,
     hazard: Any,
+    locations: NDArray[np.float64],
+    *,
     radius: float,
     track_step_hours: float | None,
 ) -> NDArray[np.float64]:
-    """Return the highest wind in the circle per event and exposure point, in kn.
+    """Return the highest wind in the circle per event and location, in kn.
 
     Raises
     ------
@@ -215,27 +289,14 @@ def _max_wind_kn(
         raise ParametricInputError(
             f"{len(missing)} hazard events have no track, e.g. {missing[:5]}"
         )
-    location_lat = np.asarray(exposures.latitude, dtype=float)
-    location_lon = np.asarray(exposures.longitude, dtype=float)
-    wind_kn = np.zeros((len(names), location_lat.size))
+    wind_kn = np.zeros((len(names), locations.shape[0]))
     for row, name in enumerate(names):
-        wind_kn[row] = _track_max_wind(
-            by_sid[name], location_lat, location_lon, radius, track_step_hours
+        lat, lon, wind, hours = _track_arrays(by_sid[name])
+        lat, lon, wind = densify_track(lat, lon, wind, hours, track_step_hours)
+        wind_kn[row] = max_wind_within_radius(
+            lat, lon, wind, locations[:, 0], locations[:, 1], radius_km=radius
         )
     return wind_kn
-
-
-def _track_max_wind(
-    track: Any,
-    location_lat: NDArray[np.float64],
-    location_lon: NDArray[np.float64],
-    radius: float,
-    track_step_hours: float | None,
-) -> NDArray[np.float64]:
-    """Return the highest wind of one track in each location's circle, in kn."""
-    lat, lon, wind, hours = _track_arrays(track)
-    lat, lon, wind = densify_track(lat, lon, wind, hours, track_step_hours)
-    return max_wind_within_radius(lat, lon, wind, location_lat, location_lon, radius)
 
 
 def _tracks_by_sid(tracks: Any) -> dict[str, Any]:
@@ -387,12 +448,13 @@ def densify_track(
     return interp(lat), interp(lon_unwrapped), interp(wind)
 
 
-def max_wind_within_radius(  # pylint: disable=too-many-positional-arguments
+def max_wind_within_radius(
     lat: NDArray[np.float64],
     lon: NDArray[np.float64],
     wind: NDArray[np.float64],
     location_lat: NDArray[np.float64],
     location_lon: NDArray[np.float64],
+    *,
     radius_km: float,
 ) -> NDArray[np.float64]:
     """Return, per location, the highest wind of the track points in the circle.
@@ -404,7 +466,8 @@ def max_wind_within_radius(  # pylint: disable=too-many-positional-arguments
     location_lat, location_lon : numpy.ndarray
         The locations, in degrees.
     radius_km : float
-        Circle radius in km; a point at exactly ``radius_km`` is inside.
+        Circle radius in km, keyword-only; a point at exactly ``radius_km``
+        is inside.
 
     Returns
     -------

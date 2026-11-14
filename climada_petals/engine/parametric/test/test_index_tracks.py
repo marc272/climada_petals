@@ -31,11 +31,18 @@ from climada.hazard import TCTracks
 
 from climada_petals.engine.parametric import (
     SAFFIR_SIMPSON_KN,
+    IndexDefinition,
+    InsuredUnits,
     ParametricIndex,
     ParametricInputError,
 )
-from climada_petals.engine.parametric.index_tracks import category_of, densify_track
+from climada_petals.engine.parametric.index_tracks import (
+    category_of,
+    densify_track,
+    max_wind_within_radius,
+)
 from climada_petals.engine.parametric.test._synthetic import (
+    POINTS,
     exposures,
     hazard_and_impact,
     three_tracks,
@@ -78,6 +85,7 @@ class TestCatInCircle(unittest.TestCase):
     def setUp(self) -> None:
         self.tracks = three_tracks()
         self.exposures = exposures()
+        self.units = InsuredUnits.points(self.exposures)
         self.hazard, self.impact = hazard_and_impact(self.tracks, self.exposures)
 
     def test_cat_in_circle_by_radius(self) -> None:
@@ -88,22 +96,22 @@ class TestCatInCircle(unittest.TestCase):
         }
         for radius, values in expected.items():
             index = ParametricIndex.from_cat_in_circle(
-                self.tracks, self.exposures, hazard=self.hazard, radius_km=radius
+                self.tracks, self.units, hazard=self.hazard, radius_km=radius
             )
             with self.subTest(radius=radius):
                 np.testing.assert_array_equal(index.values, values)
-                self.assertEqual(index.unit, "Saffir-Simpson category")
+                self.assertEqual(index.definition.unit, "Saffir-Simpson category")
 
     def test_interpolation_catches_a_storm_between_track_points(self) -> None:
         raw = ParametricIndex.from_cat_in_circle(
             self.tracks,
-            self.exposures,
+            self.units,
             hazard=self.hazard,
             radius_km=10.0,
             track_step_hours=None,
         )
         fine = ParametricIndex.from_cat_in_circle(
-            self.tracks, self.exposures, hazard=self.hazard, radius_km=10.0
+            self.tracks, self.units, hazard=self.hazard, radius_km=10.0
         )
         np.testing.assert_array_equal(raw.values, np.zeros((3, 3)))
         np.testing.assert_array_equal(fine.values[0], [4, 4, 0])
@@ -111,24 +119,24 @@ class TestCatInCircle(unittest.TestCase):
     def test_max_wind_metric_is_in_metres_per_second(self) -> None:
         index = ParametricIndex.from_cat_in_circle(
             self.tracks,
-            self.exposures,
+            self.units,
             hazard=self.hazard,
             radius_km=30.0,
             metric="max_wind",
         )
         np.testing.assert_allclose(index.values[0], 120.5 / 1.9438444924406)
-        self.assertEqual(index.unit, "m/s")
+        self.assertEqual(index.definition.unit, "m/s")
 
     def test_other_breakpoints_give_plain_categories(self) -> None:
         index = ParametricIndex.from_cat_in_circle(
             self.tracks,
-            self.exposures,
+            self.units,
             hazard=self.hazard,
             radius_km=30.0,
             breakpoints_kn=(100.0,),
         )
         np.testing.assert_array_equal(index.values, [[1, 1, 1], [0, 0, 0], [0, 0, 0]])
-        self.assertEqual(index.unit, "category")
+        self.assertEqual(index.definition.unit, "category")
 
     def test_invalid_parameters_raise(self) -> None:
         cases = [
@@ -146,7 +154,7 @@ class TestCatInCircle(unittest.TestCase):
             ):
                 ParametricIndex.from_cat_in_circle(
                     self.tracks,
-                    self.exposures,
+                    self.units,
                     hazard=self.hazard,
                     **{"radius_km": 30.0, **change},
                 )
@@ -155,14 +163,14 @@ class TestCatInCircle(unittest.TestCase):
         twice = TCTracks([*self.tracks.data, self.tracks.data[0].copy()])
         with self.assertRaisesRegex(ParametricInputError, "two tracks have the sid"):
             ParametricIndex.from_cat_in_circle(
-                twice, self.exposures, hazard=self.hazard, radius_km=30.0
+                twice, self.units, hazard=self.hazard, radius_km=30.0
             )
 
     def test_events_need_their_track(self) -> None:
         with self.assertRaisesRegex(ParametricInputError, "no track"):
             ParametricIndex.from_cat_in_circle(
                 TCTracks(self.tracks.data[:2]),
-                self.exposures,
+                self.units,
                 hazard=self.hazard,
                 radius_km=30.0,
             )
@@ -171,10 +179,106 @@ class TestCatInCircle(unittest.TestCase):
         with self.assertRaisesRegex(ParametricInputError, "kn"):
             ParametricIndex.from_cat_in_circle(
                 TCTracks([knots, *self.tracks.data[1:]]),
-                self.exposures,
+                self.units,
                 hazard=self.hazard,
                 radius_km=30.0,
             )
+
+    def test_a_group_reads_the_track_near_any_of_its_points(self) -> None:
+        # At 110 km, track B reaches the third point only (category 1).
+        units = InsuredUnits.whole(self.exposures)
+        index = ParametricIndex.from_cat_in_circle(
+            self.tracks, units, hazard=self.hazard, radius_km=110.0
+        )
+        np.testing.assert_array_equal(index.values, [[4], [1], [0]])
+        np.testing.assert_array_equal(index.event_id, self.hazard.event_id)
+        self.assertEqual(index.event_name, ("A", "B", "C"))
+        self.assertEqual(
+            index.definition,
+            IndexDefinition(
+                "cat_in_circle",
+                unit="Saffir-Simpson category",
+                index_stat="max",
+                parameters={
+                    "breakpoints_kn": list(SAFFIR_SIMPSON_KN),
+                    "metric": "category",
+                    "radius_km": 110.0,
+                    "track_step_hours": 0.5,
+                },
+            ),
+        )
+        # Two points at one location are read once and count for both.
+        twice = InsuredUnits.points(exposures([*POINTS, POINTS[2]]))
+        index = ParametricIndex.from_cat_in_circle(
+            self.tracks, twice, hazard=self.hazard, radius_km=110.0
+        )
+        np.testing.assert_array_equal(index.values[:, 2], index.values[:, 3])
+
+    def test_a_definition_rebuilds_the_index(self) -> None:
+        for metric in ("category", "max_wind"):
+            built = ParametricIndex.from_cat_in_circle(
+                self.tracks,
+                self.units,
+                hazard=self.hazard,
+                radius_km=30.0,
+                metric=metric,
+                track_step_hours=None,
+            )
+            definition = IndexDefinition.from_dict(built.definition.to_dict())
+            rebuilt = ParametricIndex.from_definition(
+                definition, self.hazard, self.units, tracks=self.tracks
+            )
+            with self.subTest(metric=metric):
+                np.testing.assert_array_equal(rebuilt.values, built.values)
+                self.assertEqual(rebuilt.definition, built.definition)
+        self.assertNotIn("breakpoints_kn", definition.parameters)
+
+    def test_a_definition_that_does_not_fit_raises(self) -> None:
+        built = ParametricIndex.from_cat_in_circle(
+            self.tracks, self.units, hazard=self.hazard, radius_km=30.0
+        )
+        document = built.definition.to_dict()
+        cases = {
+            "another unit": {**document, "unit": "category"},
+            "another statistic": {**document, "index_stat": "mean"},
+            "a missing radius": {
+                **document,
+                "parameters": {"metric": "category", "track_step_hours": 0.5},
+            },
+            "an unknown parameter": {
+                **document,
+                "parameters": {**document["parameters"], "basin": "NA"},
+            },
+        }
+        for name, changed in cases.items():
+            with (
+                self.subTest(name=name),
+                self.assertRaises(ParametricInputError),
+            ):
+                ParametricIndex.from_definition(
+                    IndexDefinition.from_dict(changed),
+                    self.hazard,
+                    self.units,
+                    tracks=self.tracks,
+                )
+        with self.assertRaisesRegex(ParametricInputError, "InsuredUnits"):
+            ParametricIndex.from_cat_in_circle(
+                self.tracks, self.exposures, hazard=self.hazard, radius_km=30.0
+            )
+
+    def test_the_highest_wind_within_the_radius(self) -> None:
+        # One track point at (0, 0); 1 degree of longitude is about 111 km.
+        np.testing.assert_array_equal(
+            max_wind_within_radius(
+                np.zeros(1),
+                np.zeros(1),
+                np.ones(1),
+                np.zeros(2),
+                np.array([0.0, 1.0]),
+                radius_km=1.0,
+            ),
+            [1.0, 0.0],
+        )
 
 
 if __name__ == "__main__":

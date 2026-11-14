@@ -104,3 +104,11 @@ climada\_petals\.engine\.parametric\.solvers module
     :members:
     :undoc-members:
     :show-inheritance:
+
+climada\_petals\.engine\.parametric\.units module
+-------------------------------------------------
+
+.. automodule:: climada_petals.engine.parametric.units
+    :members:
+    :undoc-members:
+    :show-inheritance:
