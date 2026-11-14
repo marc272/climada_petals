@@ -95,7 +95,7 @@ class CostOfCapitalLoad:
     name: ClassVar[str] = "cost_of_capital"
 
     rate: float
-    q: float
+    q: float  # pylint: disable=invalid-name
 
     def __post_init__(self) -> None:
         """Validate ``rate`` and ``q``."""

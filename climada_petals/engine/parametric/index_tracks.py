@@ -387,7 +387,7 @@ def densify_track(
     return interp(lat), interp(lon_unwrapped), interp(wind)
 
 
-def max_wind_within_radius(
+def max_wind_within_radius(  # pylint: disable=too-many-positional-arguments
     lat: NDArray[np.float64],
     lon: NDArray[np.float64],
     wind: NDArray[np.float64],
