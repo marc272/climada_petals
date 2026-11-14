@@ -26,6 +26,7 @@ from __future__ import annotations
 import dataclasses
 import itertools
 import json
+import logging
 import math
 import tempfile
 import unittest
@@ -656,6 +657,67 @@ class TestImpacts(unittest.TestCase):
         self.assertAlmostEqual(float(np.max(curve.impact)), float(paid.at_event.max()))
         exceedance = paid.local_exceedance_impact(return_periods=(10, 50))[0]
         self.assertEqual(len(exceedance), self.sample.units.n_points)
+
+    def test_aai_agg_is_the_expected_payout_from_the_frequencies(self) -> None:
+        def expected(sample: OutcomeSample) -> float:
+            table = evaluate(self.design, sample, split="in_sample")
+            return float(table["expected_payout"].iloc[0])
+
+        def frequency_weighted(sample: OutcomeSample) -> float:
+            paid = self.design.cover.payout_matrix(sample.index).sum(axis=1)
+            return float(sample.frequency @ paid)
+
+        events = OutcomeSample.from_impact(
+            self.sample.index, self.impact, units=self.sample.units, basis=EventBasis()
+        )
+        on_years = OutcomeSample.from_impact(
+            self.sample.index,
+            self.impact,
+            units=self.sample.units,
+            basis=YearSets.from_frequencies(
+                self.impact, n_years=50, rng=np.random.default_rng(393)
+            ),
+        )
+        train, _ = holdout(self.sample, train_fraction=0.7)
+        for sample in (events, self.sample, on_years, train):
+            with self.subTest(route=sample.route, split=sample.split):
+                self.assertAlmostEqual(
+                    payout_impact(self.design, sample).aai_agg
+                    / frequency_weighted(sample),
+                    1.0,
+                    places=12,
+                )
+        # The event basis, and catalogue years on a whole sample, whose
+        # events have frequency 1 / N: the evaluation's expected payout.
+        for sample in (events, self.sample):
+            self.assertAlmostEqual(
+                payout_impact(self.design, sample).aai_agg / expected(sample),
+                1.0,
+                places=12,
+            )
+        # Year sets: the mean over 50 sampled years differs from it.
+        self.assertGreater(
+            abs(payout_impact(self.design, on_years).aai_agg / expected(on_years) - 1),
+            1e-3,
+        )
+        # A side of a catalogue split: its years weigh 1 / N_side, its events
+        # keep 1 / N.
+        self.assertAlmostEqual(
+            payout_impact(self.design, train).aai_agg / expected(train),
+            train.years.size / self.sample.years.size,
+            places=12,
+        )
+
+    def test_the_loss_impact_is_read_without_deprecated_attributes(self) -> None:
+        logger = logging.getLogger("climada")
+        found = []
+        with self.assertLogs(logger, "WARNING") as logs:
+            for function in (payout_impact, uncovered_impact):
+                found.append(function(self.design, self.sample, impact=self.impact))
+            logger.warning("done")
+        self.assertEqual([line for line in logs.output if "tot_value" in line], [])
+        for impact in (*found, payout_impact(self.design, self.sample)):
+            self.assertEqual(impact.tot_value, float(self.sample.units.value.sum()))
 
     def test_a_write_hdf5_round_trip(self) -> None:
         cases = itertools.product(

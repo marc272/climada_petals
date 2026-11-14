@@ -42,7 +42,41 @@ sample it was cut from.
 * :func:`aligned_sides` cuts a sample with the blocks of another sample's
   sides, for samples of one event set, such as a baseline and a set scaled
   by ``apply_climate_scenario_knu``.
+* :func:`member_sides` cuts the members of a scenario set in turn: with the
+  blocks of an earlier member of the same event set, with the sides of the
+  parent storms that earlier members hold (:func:`parent_sides`), or else
+  by :func:`~climada_petals.engine.parametric.sample.holdout`.
 * :func:`unit_part` takes one insured unit's column, with every event.
+
+Parent storms
+-------------
+Block labels are mostly **local**: a year, ``event_id // 100`` or a
+user's label names a block of one hazard set and says nothing about
+another, whose labels can coincide by chance. The members of CLIMADA's perturbed tracks
+are different: ``TCTracks.calc_perturbed_trajectories`` names member ``m``
+of storm ``sid`` ``<sid>_gen<m>``, so the parent's name, an IBTrACS id say,
+names the same storm in every hazard set built from those tracks, such as
+the Data API's present and future ``random_walk`` sets of a country. Such
+labels are **parent storms** (:func:`parent_labels`), compared across
+hazard sets: the rule is that a sample's blocks are its events' parent
+storms when
+
+* its index has event names, and some name ends in ``_gen<m>``, and
+* every event's block is a ``str``, the text that
+  :data:`~climada_petals.engine.parametric.measure.ENSEMBLE_PARENT` reads
+  from its name: the blocks of ``labels_from_names(hazard.event_name,
+  ENSEMBLE_PARENT)``.
+
+Otherwise its blocks are local, and its events have no parent. A mixture
+of a scenario's members (:mod:`~climada_petals.engine.parametric._mixture`)
+keeps its members' parents. ``OutcomeSample(..., parents=...)`` states the
+parents of a sample the rule doesn't read, such as a set with other names;
+labelling its blocks otherwise (with a prefix, say) keeps a sample that
+follows the convention local.
+
+Splits keep a parent's events on one side (:func:`split_keys`), and
+:func:`member_sides` cuts a member that shares parent storms with earlier
+members of a scenario set with their sides.
 """
 
 from __future__ import annotations
@@ -50,7 +84,8 @@ from __future__ import annotations
 import dataclasses
 import hashlib
 import math
-from collections.abc import Hashable, Sequence
+import re
+from collections.abc import Callable, Hashable, Mapping, Sequence
 from dataclasses import dataclass
 from typing import Any, Final, NamedTuple
 
@@ -64,7 +99,7 @@ from ._draws import take_events
 from .annual import YearSets, sample_years
 from .errors import LeakageError, ParametricInputError, ScenarioError
 from .index import ParametricIndex
-from .measure import CATALOGUE
+from .measure import CATALOGUE, ENSEMBLE_PARENT
 from .units import InsuredUnits
 
 __all__ = [
@@ -76,11 +111,16 @@ __all__ = [
     "check_rng",
     "cuts",
     "kfold_pairs",
+    "member_sides",
     "mixture_token",
     "no_rng",
+    "parent_labels",
+    "parent_sides",
+    "parents_in",
     "pool_part",
     "pools",
     "source_token",
+    "split_keys",
     "train_test",
     "unit_part",
     "year_part",
@@ -169,6 +209,65 @@ def mixture_token(sources: Sequence[str]) -> str:
     """
     text = "mixture\n" + "\n".join(sources)
     return f"sha256:{hashlib.sha256(text.encode()).hexdigest()}"
+
+
+_PARENT: Final[re.Pattern[str]] = re.compile(ENSEMBLE_PARENT)
+_MEMBER: Final[re.Pattern[str]] = re.compile(r".+_gen[0-9]+")
+
+
+def parent_labels(index: ParametricIndex, block: Sequence[Any]) -> dict[int, str]:
+    """Return each event's parent storm, by event id, where the blocks name them.
+
+    The rule of the module docstring ("Parent storms"): the blocks are the
+    parents' names when the index has event names, some of them of the
+    form ``<sid>_gen<m>``, and every block is the ``str`` that
+    :data:`~climada_petals.engine.parametric.measure.ENSEMBLE_PARENT` reads
+    from its event's name. Otherwise no event has a parent: an empty dict.
+
+    Parameters
+    ----------
+    index : ParametricIndex
+        The sample's index, with its events' names if any.
+    block : sequence
+        Each event's block, in the index's order.
+    """
+    names = index.event_name
+    if names is None or not any(_MEMBER.fullmatch(name) for name in names):
+        return {}
+    labels = list(np.asarray(block, dtype=object))
+    for name, label in zip(names, labels):
+        found = _PARENT.fullmatch(name)
+        if not isinstance(label, str) or found is None or found["block"] != label:
+            return {}
+    return dict(zip(np.asarray(index.event_id).tolist(), labels))
+
+
+def parents_in(sample: Any) -> set[str]:
+    """Return the parent storms of a sample's events, or of a design's record."""
+    parents: Mapping[int, str] = getattr(sample, "parents", None) or {}
+    return {
+        parents[event]
+        for event in np.asarray(sample.event_id).tolist()
+        if event in parents
+    }
+
+
+def split_keys(sample: Any) -> NDArray[Any]:
+    """Return what a split keeps together, per event: its parent, else its block.
+
+    For a sample whose events have no parent, its blocks. Otherwise
+    ``("parent", p)`` for an event of parent ``p`` and ``("block", b)`` for
+    one of block ``b`` without a parent, so that a mixture keeps the members
+    of one storm in its several members together.
+    """
+    parents: Mapping[int, str] = sample.parents
+    block = sample.block
+    if not parents:
+        return block
+    keys = np.empty(block.size, dtype=object)
+    for row, (event, label) in enumerate(zip(sample.event_id.tolist(), block.tolist())):
+        keys[row] = ("parent", parents[event]) if event in parents else ("block", label)
+    return keys
 
 
 def catalogue_years(sample: Any) -> NDArray[np.int64]:
@@ -275,7 +374,8 @@ def pools(sample: Any, edges: list[float], rng: Any) -> NDArray[np.intp]:
     """Return each event's pool: blocks in a shuffled order, filled by frequency.
 
     ``edges`` are the cumulative shares that end the pools but the last. A
-    block goes to the pool that holds the middle of its frequency.
+    block goes to the pool that holds the middle of its frequency. Events
+    with a parent storm form one block per parent (:func:`split_keys`).
 
     Raises
     ------
@@ -284,7 +384,7 @@ def pools(sample: Any, edges: list[float], rng: Any) -> NDArray[np.intp]:
         no block.
     """
     check_rng(rng)
-    codes, labels = pd.factorize(sample.block)
+    codes, labels = pd.factorize(split_keys(sample))
     weight = np.bincount(codes, weights=sample.frequency, minlength=len(labels))
     total = float(weight.sum())
     if total <= 0:
@@ -465,7 +565,7 @@ def aligned_sides(sample: Any, reference: tuple[Any, Any], rng: Any) -> tuple[An
     """
     train, test = reference
     if sample.route == CATALOGUE:
-        _check_years(sample, train, test)
+        _check_years(sample, train, test, _SAME_SOURCE)
         sides = (
             year_part(sample, np.asarray(train.years), Part("holdout", "train")),
             year_part(sample, np.asarray(test.years), Part("holdout", "test")),
@@ -489,16 +589,19 @@ def aligned_sides(sample: Any, reference: tuple[Any, Any], rng: Any) -> tuple[An
     return sides
 
 
-def _check_years(sample: Any, train: Any, test: Any) -> None:
+_SAME_SOURCE: Final[str] = "has the source token of another sample of the set"
+_SAME_PARENTS: Final[str] = "shares parent storms with an earlier sample of the set"
+
+
+def _check_years(sample: Any, train: Any, test: Any, why: str) -> None:
     """Raise unless a catalogue sample's years are a reference split's."""
     years = np.sort(np.concatenate([train.years, test.years]))
     own = catalogue_years(sample)
     if not np.array_equal(own, years):
         raise ScenarioError(
-            "this sample has the source token of another sample of the set, so "
-            f"they are cut with the same years, but its {own.size} simulation "
-            f"years, {own[0]} to {own[-1]}, are not that sample's {years.size}, "
-            f"{years[0]} to {years[-1]}"
+            f"this sample {why}, so they are cut with the same years, but its "
+            f"{own.size} simulation years, {own[0]} to {own[-1]}, are not that "
+            f"sample's {years.size}, {years[0]} to {years[-1]}"
         )
 
 
@@ -524,6 +627,125 @@ def _sides_of_blocks(
             "sample's split"
         )
     return on_train, on_test
+
+
+def member_sides(
+    member: Any,
+    cut: dict[str | None, tuple[Any, Any]],
+    side_of: dict[str, tuple[int, tuple[Any, Any]]],
+    *,
+    fraction: float,
+    rng: Any,
+    split: Callable[..., tuple[Any, Any]],
+) -> tuple[Any, Any]:
+    """Return the holdout sides of a scenario set's member, given the members cut before.
+
+    In this order: a member with the source token of an earlier one is cut
+    with its blocks (:func:`aligned_sides`); a member that shares parent
+    storms with earlier ones (module docstring) is cut with their sides
+    (:func:`parent_sides`); any other member by ``split``, ``holdout``.
+    ``cut``, the first sides of each token, and ``side_of``, the side of
+    each parent storm (0 for training) with the sides that hold it, are
+    updated.
+
+    Raises
+    ------
+    ScenarioError
+        If the member can't be cut with the blocks of an earlier member of
+        its token, or with the sides of its parent storms.
+    ParametricInputError, LeakageError
+        As ``split``, or if a side would hold no event or no frequency.
+    """
+    shared = sorted(parents_in(member).intersection(side_of))
+    if member.source in cut:
+        pair = aligned_sides(member, cut[member.source], rng)
+    elif shared:
+        pair = parent_sides(member, side_of, shared[0], fraction, rng)
+    else:
+        pair = split(member, train_fraction=fraction, rng=rng)
+    cut.setdefault(member.source, pair)
+    for position, side in enumerate(pair):
+        for parent in parents_in(side):
+            side_of.setdefault(parent, (position, pair))
+    return pair
+
+
+def parent_sides(
+    sample: Any,
+    side_of: Mapping[str, tuple[int, tuple[Any, Any]]],
+    first: str,
+    fraction: float,
+    rng: Any,
+) -> tuple[Any, Any]:
+    """Return the holdout sides of a sample with the sides of its parent storms.
+
+    ``side_of`` gives each parent storm of earlier samples its side, 0 for
+    training, and the sides that hold it; ``first`` is a parent of
+    ``sample`` among them. On catalogue years the sample takes the years
+    of the sides that hold ``first``. On the other routes each parent storm
+    goes to its side; the blocks that no earlier sample holds are pooled by
+    frequency in an order shuffled by ``rng``, a ``fraction`` of it on the
+    training side, as :func:`pools` pools them. A side's frequencies are
+    divided by its share, and on year sets its years are sampled with
+    ``rng``.
+
+    Raises
+    ------
+    ScenarioError
+        If the catalogue years are not those sides', or a parent storm
+        would land on the other side of an earlier sample's split.
+    ParametricInputError
+        If a side would hold no event or no frequency.
+    """
+    if sample.route == CATALOGUE:
+        train, test = side_of[first][1]
+        _check_years(sample, train, test, _SAME_PARENTS)
+        sides = (
+            year_part(sample, np.asarray(train.years), Part("holdout", "train")),
+            year_part(sample, np.asarray(test.years), Part("holdout", "test")),
+        )
+    else:
+        on_train = _parent_pools(sample, side_of, fraction, rng)
+        sides = (
+            pool_part(sample, on_train, rng, Part("holdout", "train")),
+            pool_part(sample, ~on_train, rng, Part("holdout", "test")),
+        )
+    for position, side in enumerate(sides):
+        crossed = sorted(
+            parent
+            for parent in parents_in(side)
+            if side_of.get(parent, (position,))[0] != position
+        )
+        if crossed:
+            raise ScenarioError(
+                f"this sample {_SAME_PARENTS}, but cut with that sample's years it "
+                f"puts {len(crossed)} parent storms, e.g. {crossed[:5]}, on the other "
+                "side of an earlier sample's split: give the members of one storm "
+                "years on one side, or take year sets"
+            )
+    return sides
+
+
+def _parent_pools(
+    sample: Any,
+    side_of: Mapping[str, tuple[int, Any]],
+    fraction: float,
+    rng: Any,
+) -> NDArray[np.bool_]:
+    """Return which events of ``sample`` go to the training side (:func:`parent_sides`)."""
+    codes, labels = pd.factorize(split_keys(sample))
+    side = np.full(len(labels), -1)
+    for code, label in enumerate(labels):
+        if isinstance(label, tuple) and label[0] == "parent" and label[1] in side_of:
+            side[code] = side_of[label[1]][0]
+    new = np.flatnonzero(side < 0)
+    if new.size:
+        weight = np.bincount(codes, weights=sample.frequency, minlength=len(labels))
+        order = new[rng.permutation(new.size)]
+        total = float(weight[order].sum())
+        middle = np.cumsum(weight[order]) - weight[order] / 2
+        side[order] = (middle >= fraction * total) & (total > 0)
+    return np.asarray(side[codes] == 0)
 
 
 def unit_part(sample: Any, unit_id: Hashable) -> Any:

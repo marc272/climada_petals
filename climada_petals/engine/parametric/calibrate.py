@@ -365,7 +365,7 @@ class CalibrationResult:
         ``chosen``. None: no grid.
     index_diagnostics : pandas.DataFrame or None, default None
         :func:`~climada_petals.engine.parametric.basis_risk.index_diagnostics`
-        of the design sample, at the default threshold.
+        of the design sample, at its defaults.
     """
 
     cover: ParametricCover

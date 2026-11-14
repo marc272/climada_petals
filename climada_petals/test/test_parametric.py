@@ -638,7 +638,8 @@ class TestIndexDiagnostics(unittest.TestCase):
         self.assertTrue(np.all(np.abs(table["spearman"]) <= 1.0 + 1e-12))
         np.testing.assert_array_equal(
             table["comonotone_index"].astype(bool),
-            table["spearman"] >= table["threshold"] - 1e-12,
+            (table["monotone_gap"] <= table["tolerance"])
+            | (table["spearman"] >= table["threshold"] - 1e-12),
         )
         # An event with a loss at a unit has wind at one of its centroids, so
         # an index of 0 carries no loss.
@@ -665,7 +666,9 @@ class TestIndexDiagnostics(unittest.TestCase):
 
     def test_one_point_per_unit(self) -> None:
         # One point, the wind at its centroid, one impact function: the loss
-        # is a non-decreasing function of the index at every unit.
+        # is a non-decreasing function of the index at every unit, and every
+        # unit is flagged, whatever its Spearman correlation: the storms with
+        # wind below the impact function's threshold lose nothing.
         for label, hazard, exposures, impfset in (
             ("TC", data_api_hazard(TC, TC_PRESENT), litpop("JAM", "TC"), tc_impfset()),
             ("WS", data_api_hazard(WS, WS_LUX), litpop("LUX", "WS"), ws_impfset()),
@@ -679,7 +682,11 @@ class TestIndexDiagnostics(unittest.TestCase):
                 self.assertTrue(
                     np.all(np.diff(ordered, axis=0) >= -1e-6 * ordered.max())
                 )
-                self.diagnose(sample)
+                table = self.diagnose(sample)
+                self.assertTrue(np.all(table["monotone_gap"] <= table["tolerance"]))
+                self.assertEqual(
+                    table["comonotone_index"].tolist(), [True] * sample.n_units
+                )
 
     def test_groups_of_points(self) -> None:
         for label, case in (("TC", jamaica()), ("WS", luxembourg())):
@@ -697,8 +704,13 @@ class TestIndexDiagnostics(unittest.TestCase):
                 ),
             ):
                 with self.subTest(hazard=label, units=units):
+                    # A group's loss is no function of its mean wind.
                     table = self.diagnose(sample)
                     self.assertTrue(np.all(table["spearman"] < 1.0))
+                    self.assertTrue(np.all(table["monotone_gap"] > table["tolerance"]))
+                    self.assertEqual(
+                        table["comonotone_index"].tolist(), [False] * sample.n_units
+                    )
 
     def test_designs_carry_the_flags(self) -> None:
         case = jamaica()

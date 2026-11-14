@@ -21,7 +21,9 @@ Integration tests of scenarios and of the lineage of samples in
 from CLIMADA's Data API:
 
 * the present ``random_walk`` set, and its rcp 4.5 sets at 2040, 2060 and
-  2080 as one scenario, an equal-weight mixture, on year sets;
+  2080 as one scenario, an equal-weight mixture, on year sets: the future
+  sets hold the present set's parent storms with other footprints, so they
+  are cut with the present set's sides of those storms;
 * the present set and its frequencies scaled by
   ``TropCyclone.apply_climate_scenario_knu``, one event set, cut alike;
 * a design on the 41 observed years, evaluated on STORM's 10,000.
@@ -88,6 +90,15 @@ STORM_NAME = (
 
 #: Knots to metres per second.
 KN_TO_MS = 1852.0 / 3600.0
+
+
+def parents_of(sample: OutcomeSample) -> set[str]:
+    """Return the parent storms of a sample's events."""
+    return {
+        sample.parents[event]
+        for event in sample.event_id.tolist()
+        if event in sample.parents
+    }
 
 
 def with_categories(hazard: Hazard) -> TropCyclone:
@@ -200,6 +211,14 @@ class TestScenarioMixture(unittest.TestCase):
         for side in (train, test):
             for member in (*side.members[RCP45], *side.members["present"]):
                 self.assertGreaterEqual(member.n_years, 10_000)
+        # Every member holds the present set's parent storms, read from the
+        # names, and each storm is on one side in all of them.
+        present = parents_of(scenarios.sample("present"))
+        for member in scenarios.members[RCP45]:
+            self.assertEqual(parents_of(member), present)
+        for side in (train, test):
+            for member in side.members[RCP45]:
+                self.assertEqual(parents_of(member), parents_of(side.sample("present")))
         designs = calibrate_per_scenario(
             case.template(30.0, 70.0, 5, label="step"),
             train,
@@ -209,9 +228,7 @@ class TestScenarioMixture(unittest.TestCase):
         )
         frame = designs_table(designs)
         self.assertEqual(frame["scenario"].tolist(), ["present", RCP45])
-        # Each design on its own scenario's test side. The rcp 4.5 sets hold
-        # the present set's storms with other footprints: other event sets,
-        # cut with their own pools.
+        # Each design on its own scenario's test side.
         for label, design in designs.items():
             with self.subTest(design=label):
                 self.assertEqual(design.design_sample.scenario, label)
@@ -220,9 +237,17 @@ class TestScenarioMixture(unittest.TestCase):
                 self.assertEqual(row["scenario"], label)
                 self.assertAlmostEqual(row["premium"], design.premium)
                 self.assertEqual(row["n_years"], test.sample(label).n_years)
-        # The whole set holds the events the mixture's design was calibrated on.
+        # The present design on the future test sides: the same storms are
+        # on the test side there, so they are out of sample.
+        table = evaluate_scenarios(designs["present"], test, split="out_of_sample")
+        self.assertEqual(table["scenario"].unique().tolist(), ["present", RCP45])
+        # The whole set holds the events the mixture's design was calibrated
+        # on, and the parent storms of the present design.
         with self.assertRaises(LeakageError):
             evaluate_scenarios(designs[RCP45], scenarios, split="out_of_sample")
+        future = ScenarioSet({RCP45: list(scenarios.members[RCP45])})
+        with self.assertRaisesRegex(LeakageError, "parent storms are in both"):
+            evaluate_scenarios(designs["present"], future, split="out_of_sample")
 
 
 class TestClimateScenarioKnu(unittest.TestCase):

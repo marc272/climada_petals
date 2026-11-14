@@ -73,6 +73,11 @@ a mixture keeps them apart:
   The mixture of the whole members and the mixtures of their sides number
   their events alike, and have one token, so that an evaluation compares
   them (:func:`~climada_petals.engine.parametric.sample.check_out_of_sample`).
+* **Parents**: an event keeps its parent storm in its member
+  (:attr:`~climada_petals.engine.parametric.sample.OutcomeSample.parents`).
+  Parent storms name the same storm in every member, so two blocks of the
+  mixture that hold one storm in two members share its parent: a split of
+  the mixture keeps them on one side, and an evaluation compares them.
 
 **Splits.** On an annual route a split of a mixture would not mix its
 members' sides: on year sets each side would sample its years from the
@@ -595,6 +600,22 @@ def _index(
     )
 
 
+def _parents(
+    members: Sequence[OutcomeSample], event_id: NDArray[np.int64]
+) -> dict[int, str]:
+    """Return the members' parent storms by the mixture's event ids."""
+    own = [
+        member.parents.get(event)
+        for member in members
+        for event in member.event_id.tolist()
+    ]
+    return {
+        event: parent
+        for event, parent in zip(event_id.tolist(), own)
+        if parent is not None
+    }
+
+
 def _loss(members: Sequence[OutcomeSample]) -> sp.csr_matrix:
     """Return the mixture's loss: per draw, the members' events in order."""
     return sp.vstack(
@@ -742,4 +763,5 @@ def mixture_sample(label: str, members: Sequence[OutcomeSample]) -> OutcomeSampl
         scenario=label,
         n_left_out=sum(member.n_left_out for member in members),
         source=mixture_token([str(member.source) for member in members]),
+        parents=_parents(members, event_id),
     )

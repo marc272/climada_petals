@@ -125,7 +125,7 @@ Index diagnostics
 -----------------
 :func:`evaluate` and :func:`compare` run
 :func:`~climada_petals.engine.parametric.basis_risk.index_diagnostics` on
-the evaluation sample, at the default threshold, once per call. Where the
+the evaluation sample, at its defaults, once per call. Where the
 index determines the loss almost one-to-one, a cover can replicate the
 loss and the basis-risk metrics read close to zero: such units log a
 warning and are marked in ``comonotone_index``. Null where the correlation
@@ -738,7 +738,11 @@ def _impact_rows(sample: OutcomeSample, impact: Any) -> NDArray[np.intp]:
 def _as_impact(
     sample: OutcomeSample, per_unit: NDArray[np.float64], impact: Any, unit: str
 ) -> Impact:
-    """Return per-event, per-unit values as an ``Impact`` on the units' points."""
+    """Return per-event, per-unit values as an ``Impact`` on the units' points.
+
+    Its ``tot_value`` is the units' value, with or without ``impact``: the
+    loss ``Impact``'s own is deprecated in CLIMADA and not read.
+    """
     points = sample.units.to_points(per_unit)
     if impact is None:
         names = sample.index.event_name
@@ -751,7 +755,6 @@ def _as_impact(
             "frequency": np.asarray(sample.frequency, dtype=np.float64),
             "coord_exp": np.asarray(sample.units.coords),
             "crs": sample.units.exposures.crs,
-            "tot_value": float(sample.units.value.sum()),
             "haz_type": str(
                 (sample.index.definition.parameters or {}).get("haz_type", "")
             ),
@@ -770,12 +773,12 @@ def _as_impact(
             "frequency": np.asarray(impact.frequency, dtype=np.float64),
             "coord_exp": np.asarray(impact.coord_exp),
             "crs": impact.crs,
-            "tot_value": impact.tot_value,
             "haz_type": impact.haz_type,
         }
     eai_exp = np.asarray(points.T @ source["frequency"], dtype=np.float64)
     return Impact(
         **source,
+        tot_value=float(sample.units.value.sum()),
         frequency_unit="1/year",
         eai_exp=eai_exp,
         at_event=np.asarray(points.sum(axis=1), dtype=np.float64).reshape(-1),
@@ -797,9 +800,19 @@ def payout_impact(
     payout shared among its points by value share
     (:meth:`~climada_petals.engine.parametric.units.InsuredUnits.to_points`).
     ``at_event`` is its sum over the points, ``eai_exp`` the expected annual
-    payout per point and ``aai_agg`` their sum, the evaluation's
-    ``expected_payout`` of the total row. ``unit`` is the cover's
-    ``payout_unit``.
+    payout per point from the events' frequencies, ``sum_e f_e P_e``, and
+    ``aai_agg`` their sum, as CLIMADA defines them. ``unit`` is the cover's
+    ``payout_unit``, ``tot_value`` the units' value.
+
+    ``aai_agg`` is the evaluation's ``expected_payout`` of the total row on
+    the event basis, and on catalogue years for a whole sample, whose
+    events have frequency ``1 / N`` (within the route's tolerance). It is
+    not on year sets, whose ``expected_payout`` is the mean over the
+    sampled years: the two differ by the sampling error of the years
+    (:attr:`~climada_petals.engine.parametric.sample.OutcomeSample.correction_factor`
+    gives it for the loss). Nor on a side of a catalogue split, whose years
+    weigh ``1 / N_side`` while its events keep the frequency ``1 / N``:
+    there ``aai_agg`` is ``N_side / N`` times ``expected_payout``.
 
     Parameters
     ----------
@@ -871,9 +884,14 @@ def uncovered_impact(
 
     ``imp_mat`` holds ``(L_{e,j} - P_{e,j})^+``, the shortfall of each unit
     ``j`` in each event, shared among the unit's points by value share, as
-    :func:`payout_impact` shares the payouts. ``aai_agg`` is the sum over
-    the units of their ``expected_uncovered``; on a sample with draws, that
-    of one draw, whose mean over the draws is the sum on the event basis.
+    :func:`payout_impact` shares the payouts. ``aai_agg`` is
+    ``sum_e f_e U_e``, from the events' frequencies: the sum over the units
+    of their ``expected_uncovered`` where :func:`payout_impact`'s
+    ``aai_agg`` is the ``expected_payout``, on the event basis and on
+    catalogue years for a whole sample, and not on year sets or on a side
+    of a catalogue split (:func:`payout_impact`). On a sample with draws it
+    is that of one draw, whose mean over the draws is the sum on the event
+    basis.
 
     Parameters
     ----------

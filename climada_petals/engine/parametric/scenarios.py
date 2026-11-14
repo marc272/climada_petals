@@ -112,13 +112,14 @@ Splits and leakage
 Split the members, not a mixture: :meth:`ScenarioSet.holdout` splits each
 member and returns a training and a test set with the same labels; members
 of one source, such as a baseline and its frequency-scaled set, are cut
-with the same blocks. On an
-annual route a split of the mixture itself would not mix the members'
-sides (on year sets, one year would hold the events of several members),
-so ``holdout``, ``year_block_kfold`` and ``select`` raise
-:class:`~climada_petals.engine.parametric.errors.ScenarioError` on it. On
-the event basis a mixture is one set of events, which they split as any
-other.
+with the same blocks, and members that share parent storms, such as the
+Data API's present and future ``random_walk`` sets, with the same sides
+of those storms. On an annual route a split of the mixture itself would
+not mix the members' sides (on year sets, one year would hold the events
+of several members), so ``holdout``, ``year_block_kfold`` and ``select``
+raise :class:`~climada_petals.engine.parametric.errors.ScenarioError` on
+it. On the event basis a mixture is one set of events, which they split as
+any other.
 
 :func:`evaluate_scenarios` checks an out-of-sample evaluation of a design
 for leakage as :func:`~climada_petals.engine.parametric.evaluate.evaluate`
@@ -131,7 +132,9 @@ with the mixtures of the same members' sides, or of the whole members. The
 members of a mixture are different hazard sets, whose event ids and blocks
 say nothing about each other, so the mixture keeps them apart
 (:mod:`~climada_petals.engine.parametric._mixture`): the same storm in two
-members counts as two blocks.
+members counts as two blocks. Parent storms are the exception: they are
+compared whatever the source, so a design on the present set is out of
+sample only on future sets cut with its sides.
 
 A set scaled by ``apply_climate_scenario_knu`` holds its baseline's events:
 a design calibrated on the baseline has seen every footprint of it. It has
@@ -164,7 +167,7 @@ from ._mixture import (
     scenario_members,
     where,
 )
-from ._parts import aligned_sides
+from ._parts import member_sides
 from .calibrate import CalibrationOptions, CalibrationResult, DesignSample, calibrate
 from .constraints import Budget
 from .cover import IndexDefinition, ParametricCover
@@ -485,17 +488,25 @@ class ScenarioSet:
 
         Each member is split by
         :func:`~climada_petals.engine.parametric.sample.holdout`, in the
-        order of the labels and members, with the same ``rng``, except a
-        member with the source token of a member split before it: a set
-        scaled by ``apply_climate_scenario_knu`` and its baseline, say, hold
-        the same events. Such a member is cut with the blocks of the first
-        one's sides (on catalogue years, its years), so that each side holds
-        the same events in both, and a design on one side is out of sample
-        on the other side of every such member. Its frequencies are divided
-        by its own share on each side, and on year sets its years are
-        sampled from its side's events. The two sets have the labels of
-        this one, and each scenario its members' sides, so a mixture stays
-        a mixture of its members' sides.
+        order of the labels and members, with the same ``rng``, except one
+        that holds what a member split before it holds:
+
+        * its events, by the source token: a set scaled by
+          ``apply_climate_scenario_knu`` and its baseline, say. It is cut
+          with the blocks of the first one's sides (on catalogue years, its
+          years);
+        * parent storms (:mod:`~climada_petals.engine.parametric.sample`,
+          "Parent storms"): the Data API's future ``random_walk`` sets hold
+          the present set's, say. Each goes to its side there, and other
+          blocks are pooled as ``holdout`` pools them; on catalogue years
+          it takes the years of the earlier member's sides.
+
+        So a design on one side is out of sample on the other side of every
+        such member. Its frequencies are divided by its own share on each
+        side, and on year sets its years are sampled from its side's
+        events. The two sets have the labels of this one, and each scenario
+        its members' sides, so a mixture stays a mixture of its members'
+        sides.
 
         Parameters
         ----------
@@ -517,21 +528,26 @@ class ScenarioSet:
             error's note names the scenario and the member.
         ScenarioError
             If a member with the source token of an earlier one can't be
-            cut with its blocks: other simulation years, other block labels,
-            or blocks that the earlier one doesn't hold.
+            cut with its blocks (other simulation years, other block labels,
+            or blocks that the earlier one doesn't hold), or one that shares
+            its parent storms with its years (catalogue years).
         """
         sides: tuple[dict[str, list[OutcomeSample]], dict[str, list[OutcomeSample]]]
         sides = ({}, {})
-        cut: dict[str | None, tuple[OutcomeSample, OutcomeSample]] = {}
+        cut: dict[Any, Any] = {}  # the first sides of each source token
+        side_of: dict[str, Any] = {}  # each parent storm's side, and those sides
         for label, group in self.members.items():
             for position, member in enumerate(group):
                 try:
-                    if member.source in cut:
-                        pair = aligned_sides(member, cut[member.source], rng)
-                        check_no_leakage(*pair)
-                    else:
-                        pair = holdout(member, train_fraction=train_fraction, rng=rng)
-                        cut[member.source] = pair
+                    pair = member_sides(
+                        member,
+                        cut,
+                        side_of,
+                        fraction=train_fraction,
+                        rng=rng,
+                        split=holdout,
+                    )
+                    check_no_leakage(*pair)
                 except ParametricError as error:
                     error.add_note(
                         "raised by ScenarioSet.holdout at "

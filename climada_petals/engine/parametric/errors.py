@@ -96,13 +96,14 @@ class YearRouteError(ParametricInputError):
 
 
 class LeakageError(ParametricInputError):
-    """Two samples that must be disjoint share an event or a block.
+    """Two samples that must be disjoint share an event, a block or a parent storm.
 
     Examples: a training and a test sample with a common event, or with
     members of one parent storm on both sides, a split of catalogue years
-    that no contiguous cut can make without splitting a block, or a design
+    that no contiguous cut can make without splitting a block, a design
     evaluated "out of sample" on the whole sample its design sample was cut
-    from.
+    from, or a design on a present-day ensemble evaluated on a future set
+    that holds the same parent storms.
     """
 
 

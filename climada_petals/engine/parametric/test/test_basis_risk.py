@@ -69,6 +69,7 @@ from climada_petals.engine.parametric import (
 )
 from climada_petals.engine.parametric.basis_risk import (
     DIAGNOSTIC_COLUMNS,
+    MONOTONE_TOLERANCE,
     comonotone_flags,
     comonotone_of,
     diagnose,
@@ -198,7 +199,103 @@ class TestIndexDiagnostics(unittest.TestCase):
             table["zero_index_loss_share"], [0.0, 5.0 / 11.0, 0.0], atol=1e-15
         )
         self.assertEqual(table["threshold"].tolist(), [0.99] * 3)
+        # U1: from the loss of 5 at index 0 to 0 at index 50, over 5. U2: the
+        # losses 1, 2 and 3 at one index value, a fall of 2, over 3.
+        np.testing.assert_allclose(
+            table["monotone_gap"], [0.0, 1.0, 2.0 / 3.0], atol=1e-15
+        )
+        self.assertEqual(table["tolerance"].tolist(), [MONOTONE_TOLERANCE] * 3)
         self.assertEqual(table["comonotone_index"].dtype, object)
+
+    def test_a_non_decreasing_loss_is_flagged_whatever_its_ranks(self) -> None:
+        # The loss is a non-decreasing function of the index, but two events
+        # below the impact function's threshold lose nothing: their tied ranks
+        # take the Spearman correlation to 0.9747, below the threshold.
+        index, impact, units = array_index(
+            [[10.0], [20.0], [30.0], [40.0], [50.0]], [[0], [0], [1], [2], [3]]
+        )
+        sample = OutcomeSample.from_impact(
+            index, impact, units=units, basis=EventBasis()
+        )
+        expected = spearmanr([10, 20, 30, 40, 50], [0, 0, 1, 2, 3]).statistic
+        table = index_diagnostics(sample)
+        self.assertAlmostEqual(table["spearman"].iloc[0], float(expected), places=12)
+        self.assertAlmostEqual(table["spearman"].iloc[0], 0.9747, places=4)
+        self.assertEqual(table["monotone_gap"].iloc[0], 0.0)
+        self.assertIs(table["comonotone_index"].iloc[0], True)
+        # A fall of 0.5 at the top is no function any more, and the ranks
+        # stay below the threshold.
+        index, impact, units = array_index(
+            [[10.0], [20.0], [30.0], [40.0], [50.0]], [[0], [0], [1], [3], [2.5]]
+        )
+        table = index_diagnostics(
+            OutcomeSample.from_impact(index, impact, units=units, basis=EventBasis())
+        )
+        self.assertAlmostEqual(table["monotone_gap"].iloc[0], 0.5 / 3.0, places=12)
+        self.assertIs(table["comonotone_index"].iloc[0], False)
+
+    def test_the_tolerance_is_stated(self) -> None:
+        # Falls of about 6e-8 and 1e-6 of the largest loss (rounding, say),
+        # within the default tolerance of 1e-6, and of 1.5e-5, beyond it.
+        for fall, flag in ((2.0**-24, True), (2.0**-20, True), (2.0**-16, False)):
+            values = [[10.0], [20.0], [30.0], [40.0]]
+            loss = [[0.5], [1.0], [1.0 - fall], [1.0]]
+            index, _, units = array_index(values, loss)
+            sample = OutcomeSample(index, loss, [0.1] * 4, units, EventBasis())
+            table = index_diagnostics(sample)
+            with self.subTest(fall=fall):
+                self.assertEqual(table["monotone_gap"].iloc[0], fall)
+                self.assertLess(table["spearman"].iloc[0], 0.99)
+                self.assertIs(table["comonotone_index"].iloc[0], flag)
+        table = index_diagnostics(sample, tolerance=1e-4)
+        self.assertIs(table["comonotone_index"].iloc[0], True)
+        self.assertEqual(table["tolerance"].iloc[0], 1e-4)
+        for tolerance in (-1e-6, 1.0, "small", math.nan):
+            with self.subTest(tolerance=tolerance):
+                with self.assertRaisesRegex(ParametricInputError, "tolerance"):
+                    index_diagnostics(sample, tolerance=tolerance)
+
+    def test_one_point_per_unit_against_a_group(self) -> None:
+        # Flood depths drawn at four centroids, one exposure point at each and
+        # one impact function with no harm up to 1 m: about half of the rows
+        # with a depth lose nothing. Each point's loss is a function of
+        # its depth, flagged though its Spearman correlation is below 0.99;
+        # the four points as one unit, on their value-weighted mean depth,
+        # are not.
+        rng = np.random.default_rng(393)
+        depth = np.round(rng.uniform(0.0, 2.0, size=(40, 4)), 2)
+        depth[rng.uniform(size=depth.shape) < 0.2] = 0.0
+        hazard = grid_hazard(
+            depth, event_id=range(1, 41), event_name=[f"e{k}" for k in range(40)]
+        )
+        exposures = _Flood().exposures
+        impact = ImpactCalc(exposures.copy(), FLOOD_IMPF, hazard).impact(save_mat=True)
+        points = InsuredUnits.points(exposures)
+        one = index_diagnostics(
+            OutcomeSample.from_impact(
+                ParametricIndex.from_hazard(hazard, points),
+                impact,
+                units=points,
+                basis=EventBasis(),
+            )
+        )
+        np.testing.assert_array_equal(one["monotone_gap"], 0.0)
+        self.assertTrue(np.all(one["spearman"] < 0.99))
+        self.assertEqual(one["comonotone_index"].tolist(), [True] * 4)
+        whole = InsuredUnits.whole(exposures, unit_id="all")
+        group = index_diagnostics(
+            OutcomeSample.from_impact(
+                ParametricIndex.from_hazard(
+                    hazard, whole, index_stat="mean", weight="value"
+                ),
+                impact,
+                units=whole,
+                basis=EventBasis(),
+            )
+        )
+        self.assertGreater(group["monotone_gap"].iloc[0], 0.01)
+        self.assertLess(group["spearman"].iloc[0], 0.99)
+        self.assertIs(group["comonotone_index"].iloc[0], False)
 
     def test_the_weights_are_the_frequencies(self) -> None:
         # Mid-ranks of the index 0.05, 0.2, 0.45 and of the loss 0.25, 0.1, 0.45
@@ -246,7 +343,7 @@ class TestIndexDiagnostics(unittest.TestCase):
         # A drought index: the loss rises as the index falls.
         values, loss = [[10.0], [8.0], [5.0], [2.0]], [[0.0], [1.0], [3.0], [6.0]]
         lower = IndexDefinition("table", unit="1", source="synthetic", tail="lower")
-        flagged = []
+        flagged, gaps = [], []
         for definition in (lower, TABLE_WIND):
             index, impact, units = array_index(values, loss, definition=definition)
             sample = OutcomeSample.from_impact(
@@ -255,7 +352,10 @@ class TestIndexDiagnostics(unittest.TestCase):
             table = index_diagnostics(sample)
             self.assertAlmostEqual(table["spearman"].iloc[0], -1.0, places=12)
             flagged.append(table["comonotone_index"].iloc[0])
+            gaps.append(table["monotone_gap"].iloc[0])
         self.assertEqual(flagged, [True, False])
+        # The upper tail reads a fall from 6 at index 2 to 0 at index 10.
+        self.assertEqual(gaps, [0.0, 1.0])
 
     def test_draws_are_rows_of_their_event(self) -> None:
         # Two events in two draws. Event 3 has no index and a loss in draw 1
@@ -275,6 +375,10 @@ class TestIndexDiagnostics(unittest.TestCase):
         self.assertAlmostEqual(
             table["zero_index_loss_share"].iloc[0], 2.0 / 8.5, places=12
         )
+        # Two losses at one index value are a fall: event 3's 0 and 2 at an
+        # index of 0, event 1's 1 and 3 at 10, the largest from 3 to 0.5 at 20.
+        self.assertAlmostEqual(table["monotone_gap"].iloc[0], 2.5 / 3.0, places=12)
+        self.assertIs(table["comonotone_index"].iloc[0], False)
 
     def test_a_unit_without_loss_has_no_share(self) -> None:
         index, _, units = array_index([[10.0, 1.0], [20.0, 2.0]], np.zeros((2, 2)))
@@ -288,6 +392,7 @@ class TestIndexDiagnostics(unittest.TestCase):
     def test_the_threshold_is_stated(self) -> None:
         sample, _ = random_portfolio(3, n_units=1)
         rho = index_diagnostics(sample)["spearman"].iloc[0]
+        self.assertGreater(index_diagnostics(sample)["monotone_gap"].iloc[0], 0.01)
         for threshold, flag in ((rho, True), (rho + 1e-6, False), (1.0, False)):
             table = index_diagnostics(sample, threshold=threshold)
             with self.subTest(threshold=threshold):
