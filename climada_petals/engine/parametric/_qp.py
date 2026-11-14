@@ -60,6 +60,8 @@ that names it:
 (:class:`~climada_petals.engine.parametric.errors.InfeasibleCalibrationError`),
 since ``SLSQP`` often reports those as a failed line search; or anything
 else (:class:`~climada_petals.engine.parametric.errors.CalibrationError`).
+With every amount fixed nothing is solved, and a premium above the budget
+raises ``InfeasibleCalibrationError``, as on the LP route.
 
 **Uniqueness.** The minimiser over the identified amounts (not fixed, and
 reached by a row with a weight) is unique exactly when the Hessian
@@ -241,6 +243,18 @@ class _Budget:
         reference = max(self.bound, self.arr.expected_loss) or 1.0
         return premium <= self.bound + tolerance * reference
 
+    def fixed_within(self, theta: NDArray[np.float64], tolerance: float) -> bool:
+        """Whether fixed amounts' premium, under any pricing, meets the budget.
+
+        Relative to the larger of the bound, ``E[L]`` and the largest loss
+        in one row (1 in scaled units), as the check after the solve.
+        """
+        if self.bound is None:
+            return True
+        premium = self.pricing.premium(self.arr.basis @ theta, self.measure)
+        reference = max(self.bound, self.arr.expected_loss, 1.0)
+        return premium <= self.bound + tolerance * reference
+
 
 class _Rows(NamedTuple):
     """Linear rows ``matrix @ x <= rhs`` and bounds on the solver's variables."""
@@ -323,6 +337,14 @@ def _rounds(
     problem_id = quadratic.deadline.problem_id
     values = arr.lower[quadratic.free].copy()
     if not quadratic.free.any():
+        if not budget.fixed_within(
+            quadratic.amounts(values), limits.feasibility_tolerance
+        ):
+            raise InfeasibleCalibrationError(
+                "every amount is fixed, and their premium is above the budget",
+                problem_id=problem_id,
+                status="infeasible",
+            )
         return values, []
     rows = [quadratic.restrict(arr.rows, arr.rhs)]
     bounds = Bounds(arr.lower[quadratic.free], arr.upper[quadratic.free])

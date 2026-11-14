@@ -258,8 +258,10 @@ class UserObjective:
         ``(n_outcomes,)``: the loss ``L_o`` and the payout ``P_o`` per
         outcome (sums over its events, as for the other objectives) and the
         outcome weights ``w_o`` (a probability per simulated year on the
-        annual basis, the frequency on the event basis). It returns a
-        finite real number, in its own units. The arrays are copies.
+        annual basis, where the years without an event may be pooled into
+        one outcome of their summed weight; the frequency on the event
+        basis). It returns a finite real number, in its own units. The
+        arrays are copies.
     name : str
         The objective's name in the record and in logs. Keyword-only.
     parameters : mapping of str to float, int, str, bool or None, optional

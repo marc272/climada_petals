@@ -164,9 +164,10 @@ class TestGoldenDesigns(unittest.TestCase):
             {unit: set(names) for unit, names in expected["unidentified"].items()},
         )
         if isinstance(objective, MSE):
-            # The Hessian test; the LP route's ranges come later.
+            # The Hessian test.
             self.assertEqual(result.unique, expected["unique"])
         else:
+            # Without ranges=True the LP route doesn't determine it.
             self.assertIsNone(result.unique)
         if case["compare_parameters"] != "exact":
             return
@@ -199,6 +200,50 @@ class TestGoldenDesigns(unittest.TestCase):
         # Both scopes, both bases and both pricings from the core, and three
         # closed forms, one under a load; parameters and premiums as well.
         self.assertEqual(self._run(("mse",)), 11)
+
+    def _check_ranges(self, scope: str) -> int:
+        """Range the LP cases of one scope; compare ``unique`` and the parameters.
+
+        Every identified amount of the case lies within the module's wide
+        range, widened by 1e-6 of the scale: the rule of the two
+        ``"within_ranges"`` cases, applied to the ``"exact"`` ones too.
+        """
+        cases = [
+            case
+            for case in golden_cases("design")
+            if case["objective"]["kind"] != "mse" and case["scope"] == scope
+        ]
+        for case in cases:
+            sample, scale = golden_sample(case)
+            result = calibrate(
+                ParametricCover.from_dict(case["cover"]),
+                sample,
+                golden_objective(case["objective"]),
+                scope=scope,
+                pricing=golden_pricing(case["pricing"]),
+                budget=golden_budget(case["budget"]),
+                options=CalibrationOptions(ranges=True),
+            )
+            expected = case["expected"]
+            with self.subTest(case=case["case_id"]):
+                self.assertIs(result.unique, expected["unique"])
+                for unit, parameters in expected["parameters"].items():
+                    filled = set(expected["unidentified"].get(unit, ()))
+                    for name, value in parameters.items():
+                        if name in filled:
+                            continue
+                        low, high = result.ranges[unit][name]
+                        self.assertLessEqual(low - 1e-6 * scale, value, name)
+                        self.assertLessEqual(value, high + 1e-6 * scale, name)
+        return len(cases)
+
+    def test_ranges_and_uniqueness_on_the_lp_route_individual(self) -> None:
+        # step-eu-pure-annual-individual-s1 is "within_ranges", not unique.
+        self.assertEqual(self._check_ranges("individual"), 12)
+
+    def test_ranges_and_uniqueness_on_the_lp_route_joint(self) -> None:
+        # step-eu-pure-annual-joint-s1 is "within_ranges", not unique.
+        self.assertEqual(self._check_ranges("joint"), 9)
 
 
 class TestHandWorkedDesigns(unittest.TestCase):
@@ -718,7 +763,11 @@ class TestResult(unittest.TestCase):
         self.assertEqual(result.expected_loss, result.problems[0].expected_loss)
         self.assertEqual((result.basis, result.route), ("annual", "catalogue"))
         self.assertEqual(result.fill, "lowest")
+        # No grid, and no ranges without ranges=True.
         self.assertIsNone(result.ties)
+        self.assertIsNone(result.profile)
+        self.assertIsNone(result.ranges)
+        self.assertEqual(result.summary()["n_candidates"].tolist(), [None])
         record = result.design_sample
         self.assertEqual(record.n_years, 30)
         self.assertEqual(record.n_events, self.train.n_events)
@@ -865,6 +914,7 @@ class TestInputs(unittest.TestCase):
             {"time_limit": -1.0},
             {"max_slsqp_amounts": 0},
             {"max_cut_rounds": 2.5},
+            {"max_grid_points": 0},
         ]
         for fields in bad:
             with self.subTest(fields=fields), self.assertRaises(ParametricInputError):

@@ -25,7 +25,11 @@ have neither.
 
 from __future__ import annotations
 
+import copy
+import pickle
 import unittest
+
+import numpy as np
 
 from climada_petals.engine.parametric import (
     MSE,
@@ -33,6 +37,7 @@ from climada_petals.engine.parametric import (
     EventBasis,
     ExpectedUncovered,
     ParametricInputError,
+    UserObjective,
     WeightedCVaR,
 )
 from climada_petals.engine.parametric.objectives import tail_degeneracy
@@ -44,6 +49,11 @@ PAYOUT = [1.0, 12.0]
 def _measure():
     years = CatalogueYears.from_labels([1, 2], [0, 1], n_years=10)
     return years.measure([1, 2], [0.1, 0.1])
+
+
+def shortfall_squared(loss, payout, weight):
+    """Return the expected squared shortfall, ``sum_o w_o ((L_o - P_o)^+)^2``."""
+    return float(weight @ np.maximum(loss - payout, 0.0) ** 2)
 
 
 class TestObjectives(unittest.TestCase):
@@ -100,6 +110,92 @@ class TestObjectives(unittest.TestCase):
                 self.assertRaises(ParametricInputError),
             ):
                 WeightedCVaR(alpha=alpha, beta=beta)
+
+
+class TestUserObjective(unittest.TestCase):
+    """A user's function of the outcome arrays."""
+
+    def test_it_sees_the_outcomes(self) -> None:
+        # Shortfalls 3 and 0 in two years of ten: 0.1 * 9. The function gets
+        # three outcomes: the two years, and the eight without an event pooled.
+        seen = []
+
+        def spy(loss, payout, weight):
+            seen.append((loss.copy(), payout.copy(), weight.copy()))
+            return shortfall_squared(loss, payout, weight)
+
+        value = UserObjective(spy, name="spy").evaluate(LOSS, PAYOUT, _measure())
+        self.assertAlmostEqual(value, 0.9)
+        loss, payout, weight = seen[0]
+        self.assertEqual(loss.tolist(), [4.0, 10.0, 0.0])
+        self.assertEqual(payout.tolist(), [1.0, 12.0, 0.0])
+        np.testing.assert_allclose(weight, [0.1, 0.1, 0.8])
+
+    def test_document_equality_and_pickling(self) -> None:
+        objective = UserObjective(
+            shortfall_squared, name="squared", parameters={"power": 2, "note": "a"}
+        )
+        self.assertEqual(
+            objective.to_dict(),
+            {
+                "kind": "user",
+                "name": "squared",
+                "parameters": {"note": "a", "power": 2},
+            },
+        )
+        self.assertFalse(UserObjective.is_linear)
+        same = UserObjective(
+            shortfall_squared, name="squared", parameters={"note": "a", "power": 2}
+        )
+        self.assertEqual(objective, same)
+        self.assertEqual(hash(objective), hash(same))
+        for copied in (pickle.loads(pickle.dumps(objective)), copy.deepcopy(objective)):
+            self.assertEqual(copied, objective)
+        with self.assertRaises(TypeError):
+            objective.parameters["power"] = 3
+
+    def test_invalid_objectives_raise(self) -> None:
+        cases = [
+            ({"function": "f", "name": "f"}, "callable"),
+            ({"function": shortfall_squared, "name": ""}, "non-empty string"),
+            ({"function": shortfall_squared, "name": "f", "parameters": [1]}, "map"),
+            (
+                {"function": shortfall_squared, "name": "f", "parameters": {"x": []}},
+                "map names",
+            ),
+            (
+                {"function": shortfall_squared, "name": "f", "parameters": {1: 2.0}},
+                "map names",
+            ),
+            (
+                {
+                    "function": shortfall_squared,
+                    "name": "f",
+                    "parameters": {"x": np.nan},
+                },
+                "map names",
+            ),
+        ]
+        for fields, match in cases:
+            with (
+                self.subTest(match=match),
+                self.assertRaisesRegex(ParametricInputError, match),
+            ):
+                function = fields.pop("function")
+                UserObjective(function, **fields)
+
+    def test_invalid_values_raise(self) -> None:
+        for value, match in (
+            (np.nan, "not finite"),
+            ("1.0", "real number"),
+            (True, "real number"),
+        ):
+            objective = UserObjective(lambda *_, v=value: v, name="bad")
+            with (
+                self.subTest(value=value),
+                self.assertRaisesRegex(ParametricInputError, match),
+            ):
+                objective.evaluate(LOSS, PAYOUT, _measure())
 
 
 class TestTailDegeneracy(unittest.TestCase):
