@@ -28,11 +28,11 @@ from __future__ import annotations
 import unittest
 
 from climada_petals.engine.parametric import (
+    CatalogueYears,
     ExpectedUncovered,
     MeanSquaredError,
     ParametricInputError,
     WeightedCVaR,
-    outcome_measure,
 )
 
 LOSS = [4.0, 10.0]
@@ -40,9 +40,8 @@ PAYOUT = [1.0, 12.0]
 
 
 def _measure():
-    return outcome_measure(
-        [0, 1], [0.1, 0.1], basis="annual", years=range(10), n_catalogue_years=10
-    )
+    years = CatalogueYears.from_labels([1, 2], [0, 1], n_years=10)
+    return years.measure([1, 2], [0.1, 0.1])
 
 
 class TestObjectives(unittest.TestCase):

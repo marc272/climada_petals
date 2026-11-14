@@ -43,10 +43,21 @@ from CLIMADA's ``Hazard``, ``TCTracks``, ``Exposures`` and ``Impact``:
   (:meth:`~ParametricIndex.from_cat_in_circle`), a user's table
   (:meth:`~ParametricIndex.from_table`), or a cover's index on another
   hazard set (:meth:`~ParametricIndex.from_definition`). Events are matched
-  on ``event_id`` (:meth:`~ParametricIndex.matched_to`). Simulation years
-  are attached with :meth:`~ParametricIndex.with_years`, read from the
-  dates or the event names or given; :func:`split_years` gives training
-  and test years.
+  on ``event_id`` (:meth:`~ParametricIndex.matched_to`). An index holds no
+  years.
+* **Outcomes:** :class:`OutcomeSample` joins an index, an ``Impact``'s loss
+  per unit and a stated basis, which says what an outcome is:
+  :class:`EventBasis` (one outcome per event, weighted by its frequency, for
+  any hazard), or one simulated year on :class:`CatalogueYears` (a year
+  label per event, from the dates, the event names or an array) or
+  :class:`YearSets` (years sampled from the frequencies with a seeded
+  generator, as ``climada.util.yearsets`` does, or a given
+  ``sampling_vect``). A route that doesn't fit the events raises
+  :class:`YearRouteError`.
+* **Splits:** :func:`holdout` and :func:`year_block_kfold` split a sample by
+  blocks: contiguous years on catalogue years, pools of events or of
+  ensemble parents on the other routes, with no event or parent on both
+  sides (:func:`check_no_leakage`, :class:`LeakageError`).
 * **Objectives:** :class:`WeightedCVaR`, the tail objective
   ``alpha CVaR_beta(U) + (1 - alpha) E[U]`` of the uncovered loss ``U``,
   next to :class:`ExpectedUncovered` (``E[U]``) and
@@ -60,8 +71,6 @@ from CLIMADA's ``Hazard``, ``TCTracks``, ``Exposures`` and ``Impact``:
   each other's shortfalls), and returns a :class:`CalibrationResult`.
   Pricing: :class:`PurePremium` or :class:`CostOfCapitalLoad`, under a
   premium budget.
-* **Basis:** ``"annual"`` (outcomes are simulation years, so
-  ``CVaR_beta`` has a return-period meaning) or ``"event"``.
 * **Metrics:** :func:`basis_risk`, and the payouts as a CLIMADA ``Impact``
   (:meth:`CalibrationResult.payout_impact`).
 
@@ -69,6 +78,7 @@ The module depends only on CLIMADA, numpy, scipy and pandas, plus cvxpy for
 the mean squared error.
 """
 
+from .annual import CatalogueYears, YearSets, sample_years
 from .calibrate import CalibrationResult, CoverProblem, calibrate
 from .cover import IndexDefinition, Limit, ParametricCover
 from .errors import (
@@ -76,16 +86,18 @@ from .errors import (
     CoverDefinitionError,
     EventAlignmentError,
     ImpactInputError,
+    LeakageError,
     MissingDependencyError,
     ParametricError,
     ParametricInputError,
     UnitMappingError,
     UnknownPayoutKindError,
     UnresolvedParameterError,
+    YearRouteError,
 )
-from .index import ParametricIndex, split_years
+from .index import ParametricIndex
 from .index_tracks import SAFFIR_SIMPSON_KN
-from .measure import OutcomeMeasure, outcome_measure
+from .measure import ENSEMBLE_PARENT, EventBasis, OutcomeMeasure, labels_from_names
 from .metrics import basis_risk
 from .objectives import ExpectedUncovered, MeanSquaredError, WeightedCVaR
 from .parameters import AmountConstraints, Free
@@ -100,29 +112,41 @@ from .payout import (
 )
 from .pricing import CostOfCapitalLoad, PurePremium
 from .riskmeasures import var_cvar
+from .sample import (
+    OutcomeSample,
+    SplitRecord,
+    check_no_leakage,
+    holdout,
+    year_block_kfold,
+)
 from .units import InsuredUnits
 
 __all__ = [
+    "ENSEMBLE_PARENT",
     "SAFFIR_SIMPSON_KN",
     "AmountConstraints",
     "BinaryPayout",
     "CalibrationError",
     "CalibrationResult",
+    "CatalogueYears",
     "CostOfCapitalLoad",
     "CoverDefinitionError",
     "CoverProblem",
     "EventAlignmentError",
+    "EventBasis",
     "ExpectedUncovered",
     "Free",
     "ImpactInputError",
     "IndexDefinition",
     "InsuredUnits",
+    "LeakageError",
     "Limit",
     "LinearInAmounts",
     "LinearPayout",
     "MeanSquaredError",
     "MissingDependencyError",
     "OutcomeMeasure",
+    "OutcomeSample",
     "ParametricCover",
     "ParametricError",
     "ParametricIndex",
@@ -130,15 +154,21 @@ __all__ = [
     "PayoutFunction",
     "PiecewiseLinearPayout",
     "PurePremium",
+    "SplitRecord",
     "StepPayout",
     "UnitMappingError",
     "UnknownPayoutKindError",
     "UnresolvedParameterError",
     "WeightedCVaR",
+    "YearRouteError",
+    "YearSets",
     "basis_risk",
     "calibrate",
-    "outcome_measure",
+    "check_no_leakage",
+    "holdout",
+    "labels_from_names",
     "register_payout",
-    "split_years",
+    "sample_years",
     "var_cvar",
+    "year_block_kfold",
 ]

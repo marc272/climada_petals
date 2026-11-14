@@ -19,8 +19,8 @@ with CLIMADA. If not, see <https://www.gnu.org/licenses/>.
 Calibrate a parametric cover: choose the payout levels of every unit.
 
 :func:`calibrate` fits a :class:`~climada_petals.engine.parametric.payout.StepPayout` to
-the losses of a CLIMADA ``Impact``, given a
-:class:`~climada_petals.engine.parametric.index.ParametricIndex` aligned with it. The
+the losses of an :class:`~climada_petals.engine.parametric.sample.OutcomeSample`: an
+index, the loss of a CLIMADA ``Impact`` per event and unit, and a basis. The
 **scope** says which units share a design problem:
 
 ``"individual"``
@@ -40,9 +40,9 @@ With the same ``budget``, the individual budgets add up to the portfolio
 budget. The individual designs taken together satisfy the portfolio
 problem's constraints (under a cost-of-capital load too, because the loaded
 premium of a total is at most the sum of the loaded premiums), so on the
-calibration years the portfolio optimum is at most their objective on the
+calibration sample the portfolio optimum is at most their objective on the
 total. That is a property of the optimisation; nothing here says which scope
-gives the better cover on other years.
+gives the better cover on other samples.
 
 **Per-unit levels of a portfolio cover are not unique.** The objective of a
 joint design problem depends on the units' payouts only through their total
@@ -51,33 +51,37 @@ and the linear program can have several optimal solutions besides. The
 levels a portfolio cover holds are the one optimal split the solver
 returned. Read them, and per-unit metrics of a portfolio cover, as that.
 
-The objective, the premium and the budget all use the outcome measure of
-the ``basis`` (:mod:`~climada_petals.engine.parametric.measure`) over the calibration
-years. Rows of the ``Impact`` are events, so with ``basis="annual"`` the
-events of a year are summed: the CVaR is a CVaR over years.
+The objective, the premium and the budget all use the sample's outcome
+measure (:mod:`~climada_petals.engine.parametric.measure`). On an annual route the
+events of a year are summed: the CVaR is a CVaR over years. On the event
+basis the measure is read as a probability over one year, so the
+frequencies must sum to at most 1 there
+(:meth:`~climada_petals.engine.parametric.measure.OutcomeMeasure.as_probability`).
 """
 
 from __future__ import annotations
 
 from collections.abc import Hashable, Mapping
 from dataclasses import dataclass, field
-from typing import Any, Final, Literal, NamedTuple, get_args
+from typing import Any, Final, Literal, get_args
 
 import numpy as np
 import pandas as pd
-from numpy.typing import ArrayLike, NDArray
+from numpy.typing import NDArray
 
 from climada_petals.util.config import LOGGER
 
 from ._checks import check_real, finite_array, read_only
 from .errors import ParametricInputError
 from .index import ParametricIndex
-from .measure import BASES, OutcomeMeasure, outcome_measure
+from .measure import OutcomeMeasure
 from .objectives import ExpectedUncovered, MeanSquaredError, Objective, WeightedCVaR
 from .parameters import Free
 from .payout import StepPayout
 from .pricing import CostOfCapitalLoad, Pricing, PurePremium
+from .sample import OutcomeSample
 from .solvers import DesignData, SolverInfo, solve_design
+from .units import InsuredUnits
 
 __all__ = [
     "PORTFOLIO",
@@ -86,7 +90,6 @@ __all__ = [
     "CoverProblem",
     "Scope",
     "calibrate",
-    "loss_matrix",
 ]
 
 Scope = Literal["individual", "portfolio"]
@@ -97,8 +100,6 @@ SCOPES: Final[tuple[str, ...]] = get_args(Scope)
 
 PORTFOLIO: Final[str] = "portfolio"
 """``problem_id`` of the portfolio scope's single design problem."""
-
-_FREQUENCY_RTOL: Final[float] = 1e-9
 
 
 @dataclass(frozen=True)
@@ -113,12 +114,12 @@ class CoverProblem:
         The units of the problem.
     objective_value : float
         The optimal objective value, in loss units (squared for the mean
-        squared error), on the calibration years.
+        squared error), on the calibration sample.
     premium : float
         The premium of the problem's payout under the cover's pricing, on
-        the calibration years.
+        the calibration sample.
     expected_loss : float
-        ``E[L]`` of the problem's total loss, on the calibration years.
+        ``E[L]`` of the problem's total loss, on the calibration sample.
     budget_bound : float or None
         ``budget * expected_loss``, or None without a budget.
     solver : SolverInfo
@@ -157,7 +158,8 @@ class CalibrationResult:
     scope : {"individual", "portfolio"}
         Which units shared a design problem.
     basis : {"annual", "event"}
-        The basis of the objective, the premium and the budget.
+        The basis of the calibration sample: of the objective, the premium
+        and the budget.
     budget : float or None
         ``kappa`` in ``premium <= kappa E[L]``, or None.
     unit_id : tuple of hashable
@@ -168,8 +170,9 @@ class CalibrationResult:
         docstring).
     problems : tuple of CoverProblem
         One per design problem: one per unit, or one for the portfolio.
-    calibration_years : numpy.ndarray of int
-        The simulation years the cover was calibrated on.
+    calibration_years : numpy.ndarray of int or None
+        The simulation years of a calibration sample on catalogue years;
+        None on the other routes.
     """
 
     payout: StepPayout
@@ -181,7 +184,7 @@ class CalibrationResult:
     unit_id: tuple[Hashable, ...]
     levels: NDArray[np.float64]
     problems: tuple[CoverProblem, ...]
-    calibration_years: NDArray[np.int64]
+    calibration_years: NDArray[np.int64] | None
 
     def __post_init__(self) -> None:
         """Validate the shapes and store read-only copies."""
@@ -198,13 +201,14 @@ class CalibrationResult:
         object.__setattr__(self, "levels", read_only(levels))
         object.__setattr__(self, "unit_id", tuple(self.unit_id))
         object.__setattr__(self, "problems", tuple(self.problems))
-        object.__setattr__(
-            self, "calibration_years", read_only(np.asarray(self.calibration_years))
-        )
+        if self.calibration_years is not None:
+            object.__setattr__(
+                self, "calibration_years", read_only(np.asarray(self.calibration_years))
+            )
 
     @property
     def premium(self) -> float:
-        """Sum of the design problems' premiums, on the calibration years.
+        """Sum of the design problems' premiums, on the calibration sample.
 
         In the portfolio scope this is the one problem's premium. In the
         individual scope it is the price of buying each unit's cover
@@ -219,8 +223,8 @@ class CalibrationResult:
         Parameters
         ----------
         index : ParametricIndex
-            An index with the cover's units, e.g. the test years of the
-            calibration index, or another hazard set.
+            An index with the cover's units, e.g. a sample's ``index``, or
+            one on another hazard set.
 
         Returns
         -------
@@ -239,17 +243,22 @@ class CalibrationResult:
             )
         return _paid(self.payout, index.values, self.levels)
 
-    def payout_impact(self, index: ParametricIndex, impact: Any) -> Any:
+    def payout_impact(
+        self, index: ParametricIndex, impact: Any, *, units: InsuredUnits
+    ) -> Any:
         """Return the payouts as a CLIMADA ``Impact``, aligned with ``impact``.
 
         Parameters
         ----------
         index : ParametricIndex
-            The index the payouts are computed from.
+            The index the payouts are computed from, with every event of
+            ``impact``.
         impact : climada.engine.Impact
-            The loss impact of the same events and exposure points, as for
-            :func:`calibrate`. Its events, dates, frequencies, coordinates
-            and unit are copied.
+            The loss impact of the same events, on the units' exposure
+            points, with ``imp_mat``. Its events, dates, frequencies,
+            coordinates and unit are copied.
+        units : InsuredUnits
+            The insured units, with the cover's ``unit_id`` in order.
 
         Returns
         -------
@@ -266,12 +275,21 @@ class CalibrationResult:
         Raises
         ------
         ParametricInputError
-            If ``impact`` does not match ``index`` (see :func:`loss_matrix`).
+            If ``units`` are not the cover's.
+        ImpactInputError
+            If ``impact`` is not a loss on the units' exposure points
+            (:meth:`~climada_petals.engine.parametric.units.InsuredUnits.check_impact`).
+        EventAlignmentError
+            If the impact's events are not the index's.
         """
-        loss_matrix(index, impact)
+        if not isinstance(units, InsuredUnits) or tuple(units.unit_id) != self.unit_id:
+            raise ParametricInputError(
+                "units must be the InsuredUnits of the cover's unit_id, in order"
+            )
+        units.check_impact(impact)
         payout = np.empty((index.n_events, len(self.unit_id)))
         payout[index.rows_in(impact)] = self.payout_matrix(index)
-        points = index.units.to_points(payout)
+        points = units.to_points(payout)
         frequency = np.asarray(impact.frequency, dtype=float)
         eai_exp = np.asarray(points.T @ frequency, dtype=float)
         impact_class = type(impact)
@@ -343,57 +361,6 @@ class CalibrationResult:
         return pd.DataFrame(rows)
 
 
-def loss_matrix(index: ParametricIndex, impact: Any) -> NDArray[np.float64]:
-    """Return the loss per event and unit of ``impact``, checked against ``index``.
-
-    Parameters
-    ----------
-    index : ParametricIndex
-        The index, with its insured units
-        (:class:`~climada_petals.engine.parametric.units.InsuredUnits`) and
-        its simulation years (``with_years``).
-    impact : climada.engine.Impact
-        Computed with ``save_mat=True`` on the units' exposure points, for
-        the index's events in any order, e.g. ``ImpactCalc(exposures,
-        impfset, hazard).impact(save_mat=True)``.
-
-    Returns
-    -------
-    numpy.ndarray
-        ``impact.imp_mat`` summed over each unit's points, as a dense
-        ``(n_events, n_units)`` array in the index's event order: the events
-        are matched on ``event_id``.
-
-    Raises
-    ------
-    ParametricInputError
-        If the index has no units or no simulation years, or the impact's
-        frequencies are not the index's.
-    ImpactInputError
-        If the impact has no ``imp_mat``, its ``frequency_unit`` is not
-        ``1/year``, its exposure points are not the units', or a loss is
-        negative or not finite.
-    EventAlignmentError
-        If the impact's events are not the index's.
-    """
-    units = index.units
-    if units is None:
-        raise ParametricInputError(
-            "the index has no InsuredUnits to sum the impact's exposure points "
-            "into; build it with a ParametricIndex builder, or pass units="
-        )
-    units.check_impact(impact)
-    rows = index.rows_in(impact)
-    if not np.allclose(
-        np.asarray(impact.frequency, dtype=float)[rows],
-        index.frequency,
-        rtol=_FREQUENCY_RTOL,
-        atol=0.0,
-    ):
-        raise ParametricInputError("the impact's frequencies are not the index's")
-    return units.aggregate(impact.imp_mat)[rows].toarray()
-
-
 def _check_objective(objective: object) -> Objective:
     """Return ``objective`` if it is one of the module's objectives."""
     if not isinstance(objective, MeanSquaredError | ExpectedUncovered | WeightedCVaR):
@@ -429,21 +396,20 @@ def _diagnostics(
 
 
 def _problems(
-    scope: str, index: ParametricIndex, loss: NDArray[np.float64]
+    scope: str, unit_id: tuple[Hashable, ...]
 ) -> list[tuple[str, NDArray[np.intp]]]:
     """Return ``(problem_id, unit positions)`` for each design problem."""
     if scope == PORTFOLIO:
-        return [(PORTFOLIO, np.arange(loss.shape[1]))]
-    return [(str(unit), np.array([j])) for j, unit in enumerate(index.unit_id)]
+        return [(PORTFOLIO, np.arange(len(unit_id)))]
+    return [(str(unit), np.array([j])) for j, unit in enumerate(unit_id)]
 
 
 def _check_arguments(
-    index: object,
+    sample: object,
     payout: object,
     objective: object,
     pricing: object,
     *,
-    basis: object,
     scope: object,
 ) -> tuple[Objective, Pricing]:
     """Check the arguments of :func:`calibrate`; return the objective and pricing.
@@ -453,8 +419,10 @@ def _check_arguments(
     ParametricInputError
         If an argument is not one the module accepts.
     """
-    if not isinstance(index, ParametricIndex):
-        raise ParametricInputError(f"index must be a ParametricIndex, got {index!r}")
+    if not isinstance(sample, OutcomeSample):
+        raise ParametricInputError(
+            f"sample must be an OutcomeSample, got {type(sample).__name__}"
+        )
     if not isinstance(payout, StepPayout):
         raise ParametricInputError(f"payout must be a StepPayout, got {payout!r}")
     if (
@@ -470,64 +438,11 @@ def _check_arguments(
         )
     checked_objective = _check_objective(objective)
     checked_pricing = _check_pricing(pricing)
-    if basis not in BASES:
-        raise ParametricInputError(f"basis must be one of {list(BASES)}, got {basis!r}")
     if scope not in SCOPES:
         raise ParametricInputError(
             f"scope must be one of {list(SCOPES)}, got {scope!r}"
         )
     return checked_objective, checked_pricing
-
-
-class _Outcomes(NamedTuple):
-    """Chosen years, their events and the outcome measure over them."""
-
-    years: NDArray[np.int64]
-    mask: NDArray[np.bool_]
-    measure: OutcomeMeasure
-
-
-def _outcomes_of_years(
-    index: ParametricIndex, years: ArrayLike | None, *, basis: str, purpose: str
-) -> _Outcomes:
-    """Return the chosen years, their events and the outcome measure over them.
-
-    Parameters
-    ----------
-    index : ParametricIndex
-        The index whose years and events are used.
-    years : array_like of int or None
-        The years; None means all of the index's years.
-    basis : {"annual", "event"}
-        The basis of the measure.
-    purpose : str
-        What the years are for, e.g. ``"calibration"``, for the message.
-
-    Returns
-    -------
-    _Outcomes
-        ``years``, the years, sorted; ``mask``, the events in those years,
-        shape ``(index.n_events,)``; ``measure``, the measure over those
-        events.
-
-    Raises
-    ------
-    ParametricInputError
-        If the years are invalid or hold no event, or the frequencies do not
-        fit the basis.
-    """
-    chosen = index.check_years(years)
-    mask = np.isin(index.event_year, chosen)
-    if not mask.any():
-        raise ParametricInputError(f"the {purpose} years hold no event")
-    measure = outcome_measure(
-        index.event_year[mask],
-        index.frequency[mask],
-        basis=basis,
-        years=chosen,
-        n_catalogue_years=index.years.size,
-    )
-    return _Outcomes(chosen, mask, measure)
 
 
 @dataclass(frozen=True, eq=False)
@@ -565,59 +480,51 @@ def _cover_problem(
 
 
 def _solve_problems(
-    design: _Design,
-    scope: str,
-    index: ParametricIndex,
-    loss: NDArray[np.float64],
-    mask: NDArray[np.bool_],
+    design: _Design, scope: str, sample: OutcomeSample
 ) -> tuple[NDArray[np.float64], list[CoverProblem]]:
     """Solve every design problem of the scope; return the levels and the records."""
-    levels = np.zeros((index.n_units, design.payout.n_steps))
+    levels = np.zeros((sample.n_units, design.payout.n_steps))
     problems: list[CoverProblem] = []
-    for problem_id, units in _problems(scope, index, loss):
+    index = sample.index_values
+    loss = sample.loss.toarray()
+    for problem_id, units in _problems(scope, sample.unit_id):
         data = DesignData(
             problem_id=problem_id,
-            index=index.values[mask][:, units],
-            loss=loss[mask][:, units],
+            index=index[:, units],
+            loss=loss[:, units],
             measure=design.measure,
         )
         problem, levels[units] = _cover_problem(
-            design, data, tuple(index.unit_id[j] for j in units)
+            design, data, tuple(sample.unit_id[j] for j in units)
         )
         problems.append(problem)
         _log(problem, design.objective)
     return levels, problems
 
 
-def calibrate(  # pylint: disable=too-many-arguments
-    index: ParametricIndex,
-    impact: Any,
+def calibrate(
+    sample: OutcomeSample,
     *,
     payout: StepPayout,
     objective: Objective,
-    basis: str,
     scope: str = "individual",
     pricing: Pricing = PurePremium(),  # frozen, so safe to share
     budget: float | None = None,
-    years: ArrayLike | None = None,
 ) -> CalibrationResult:
     """Fit the payout levels of every unit (module docstring).
 
     Parameters
     ----------
-    index : ParametricIndex
-        The index, aligned with the impact's events and exposure points.
-    impact : climada.engine.Impact
-        The loss to cover, with ``imp_mat`` (``save_mat=True``).
+    sample : OutcomeSample
+        The calibration sample: the index, the loss to cover and the basis,
+        e.g. the training side of
+        :func:`~climada_petals.engine.parametric.sample.holdout`.
     payout : StepPayout
         The payout template of every unit: fixed breakpoints, ``tail="upper"``,
         ``monotone=True`` and every level ``Free()``, as
         :meth:`StepPayout.uniform` gives it.
     objective : MeanSquaredError, ExpectedUncovered or WeightedCVaR
         What the levels minimise. The mean squared error needs cvxpy.
-    basis : {"annual", "event"}
-        The basis of the objective, the premium and the budget. ``"annual"``
-        takes the CVaR over simulation years.
     scope : {"individual", "portfolio"}, default "individual"
         One design problem per unit, or one joint problem on the total.
     pricing : PurePremium or CostOfCapitalLoad, default PurePremium()
@@ -625,9 +532,6 @@ def calibrate(  # pylint: disable=too-many-arguments
     budget : float, optional
         ``kappa >= 0`` in ``premium <= kappa * E[L]``, per design problem.
         Default: no budget.
-    years : array_like of int, optional
-        The calibration years, e.g. the training block of
-        :func:`~climada_petals.engine.parametric.index.split_years`. Default: all years.
 
     Returns
     -------
@@ -638,9 +542,8 @@ def calibrate(  # pylint: disable=too-many-arguments
     Raises
     ------
     ParametricInputError
-        If an argument is invalid, the impact does not match the index, the
-        calibration years hold no event, or the frequencies do not fit the
-        basis.
+        If an argument is invalid, or the sample is on the event basis with
+        frequencies that sum to more than 1 per year.
     CalibrationError
         If a design problem is not solved to optimality. No problem is
         skipped.
@@ -651,41 +554,34 @@ def calibrate(  # pylint: disable=too-many-arguments
     --------
     A tail objective calibrated jointly across the units:
 
+    >>> train, test = holdout(sample, train_fraction=0.7)  # doctest: +SKIP
     >>> cover = calibrate(  # doctest: +SKIP
-    ...     index,
-    ...     impact,
+    ...     train,
     ...     payout=StepPayout.uniform(attachment=1, exhaustion=6, n_steps=5),
     ...     objective=WeightedCVaR(alpha=0.9, beta=0.99),
-    ...     basis="annual",
     ...     scope="portfolio",
     ...     budget=1.0,
-    ...     years=train,
     ... )
     """
     objective, pricing = _check_arguments(
-        index, payout, objective, pricing, basis=basis, scope=scope
+        sample, payout, objective, pricing, scope=scope
     )
     kappa = None if budget is None else check_real("budget", budget, low=0.0)
-    loss = loss_matrix(index, impact)
-    outcomes = _outcomes_of_years(index, years, basis=basis, purpose="calibration")
+    measure = sample.measure.as_probability()
     levels, problems = _solve_problems(
-        _Design(payout, objective, pricing, kappa, outcomes.measure),
-        scope,
-        index,
-        loss,
-        outcomes.mask,
+        _Design(payout, objective, pricing, kappa, measure), scope, sample
     )
     return CalibrationResult(
         payout=payout,
         objective=objective,
         pricing=pricing,
         scope=scope,
-        basis=basis,
+        basis=measure.basis,
         budget=kappa,
-        unit_id=tuple(index.unit_id),
+        unit_id=sample.unit_id,
         levels=levels,
         problems=tuple(problems),
-        calibration_years=outcomes.years,
+        calibration_years=sample.years,
     )
 
 

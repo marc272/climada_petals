@@ -18,8 +18,9 @@ with CLIMADA. If not, see <https://www.gnu.org/licenses/>.
 
 Basis-risk metrics of a calibrated cover.
 
-:func:`basis_risk` evaluates a cover on a set of simulation years, usually
-the test years that it was not calibrated on. With outcome probabilities
+:func:`basis_risk` evaluates a cover on an
+:class:`~climada_petals.engine.parametric.sample.OutcomeSample`, usually the test
+side of a split that the cover was not calibrated on. With outcome probabilities
 ``p_o`` (:mod:`~climada_petals.engine.parametric.measure`) and, for each subject, the
 outcome loss ``L_o``, payout ``P_o``, uncovered loss
 ``U_o = sum_{e in o} (L_e - P_e)^+`` and residual ``R_o = L_o - P_o``:
@@ -58,11 +59,11 @@ import pandas as pd
 from numpy.typing import ArrayLike, NDArray
 
 from ._checks import check_level
-from .calibrate import PORTFOLIO, CalibrationResult, _outcomes_of_years, loss_matrix
+from .calibrate import PORTFOLIO, CalibrationResult
 from .errors import ParametricInputError
-from .index import ParametricIndex
-from .measure import BASES, OutcomeMeasure
+from .measure import OutcomeMeasure
 from .riskmeasures import var_cvar
+from .sample import OutcomeSample
 
 __all__ = ["METRICS", "basis_risk", "subject_metrics"]
 
@@ -162,60 +163,46 @@ def _unit_rows(
 
 
 def basis_risk(
-    index: ParametricIndex,
-    impact: Any,
-    cover: CalibrationResult,
-    *,
-    beta: float,
-    years: ArrayLike | None = None,
-    basis: str | None = None,
+    sample: OutcomeSample, cover: CalibrationResult, *, beta: float
 ) -> pd.DataFrame:
     """Return the basis-risk metrics of a cover (module docstring).
 
     Parameters
     ----------
-    index : ParametricIndex
-        The index with the cover's units, aligned with ``impact``.
-    impact : climada.engine.Impact
-        The loss, with ``imp_mat`` (``save_mat=True``).
+    sample : OutcomeSample
+        The evaluation sample, with the cover's units, e.g. the test side
+        of :func:`~climada_petals.engine.parametric.sample.holdout`. Its basis
+        is the metrics' basis.
     cover : CalibrationResult
         The calibrated cover.
     beta : float
         Level of ``var_uncovered`` and ``cvar_uncovered``, in ``(0, 1)``.
         On the annual basis, ``beta = 0.99`` is the 100-year level.
-    years : array_like of int, optional
-        The evaluation years, e.g. the test block of
-        :func:`~climada_petals.engine.parametric.index.split_years`. Default: all years.
-    basis : {"annual", "event"}, optional
-        Default: the cover's basis.
 
     Returns
     -------
     pandas.DataFrame
         One row per unit and one ``"portfolio"`` row, with the columns
-        ``level``, ``subject``, ``basis``, ``beta``, ``n_years``, the
-        :data:`METRICS`, ``premium`` and ``split_identified``.
+        ``level``, ``subject``, ``basis``, ``beta``, ``n_years`` (None on
+        the event basis), the :data:`METRICS`, ``premium`` and
+        ``split_identified``.
 
     Raises
     ------
     ParametricInputError
-        If the impact does not match the index, the index's units are not
-        the cover's, the years hold no event, or the frequencies do not fit
-        the basis.
+        If ``sample`` is not an ``OutcomeSample``, its units are not the
+        cover's, or it is on the event basis with frequencies that sum to
+        more than 1 per year.
     """
-    chosen_basis = cover.basis if basis is None else basis
-    if chosen_basis not in BASES:
+    if not isinstance(sample, OutcomeSample):
         raise ParametricInputError(
-            f"basis must be one of {list(BASES)}, got {chosen_basis!r}"
+            f"sample must be an OutcomeSample, got {type(sample).__name__}"
         )
     level = check_level("beta", beta)
-    loss = loss_matrix(index, impact)
-    payout = cover.payout_matrix(index)
-    _, mask, measure = _outcomes_of_years(
-        index, years, basis=chosen_basis, purpose="evaluation"
-    )
-    loss, payout = loss[mask], payout[mask]
-    rows = _unit_rows(cover, loss, payout, measure, unit_id=index.unit_id, beta=level)
+    payout = cover.payout_matrix(sample.index)[sample.event_row]
+    loss = sample.loss.toarray()
+    measure = sample.measure.as_probability()
+    rows = _unit_rows(cover, loss, payout, measure, unit_id=sample.unit_id, beta=level)
     total_paid = payout.sum(axis=1)
     rows.append(
         {
@@ -227,7 +214,7 @@ def basis_risk(
         }
     )
     frame = pd.DataFrame(rows)
-    frame.insert(2, "basis", chosen_basis)
+    frame.insert(2, "basis", measure.basis)
     frame.insert(3, "beta", level)
     frame.insert(4, "n_years", measure.n_years)
     return frame

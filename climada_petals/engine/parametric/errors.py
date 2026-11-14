@@ -30,12 +30,14 @@ __all__ = [
     "CoverDefinitionError",
     "EventAlignmentError",
     "ImpactInputError",
+    "LeakageError",
     "MissingDependencyError",
     "ParametricError",
     "ParametricInputError",
     "UnitMappingError",
     "UnknownPayoutKindError",
     "UnresolvedParameterError",
+    "YearRouteError",
 ]
 
 
@@ -76,6 +78,25 @@ class ImpactInputError(ParametricInputError):
     ``save_mat=True``), a ``frequency_unit`` other than ``1/year``, exposures
     with ``cover`` or ``deductible`` (their losses are already net of an
     indemnity layer), or negative losses.
+    """
+
+
+class YearRouteError(ParametricInputError):
+    """An annual route doesn't fit the events.
+
+    Examples: catalogue years whose events don't all have the frequency
+    ``1 / N`` (a set scaled by ``apply_climate_scenario_knu``, or dates that
+    don't carry the years), an event name that doesn't match its pattern, or
+    a ``sampling_vect`` that holds event ids instead of positions.
+    """
+
+
+class LeakageError(ParametricInputError):
+    """Two samples that must be disjoint share an event or a block.
+
+    Examples: a training and a test sample with a common event, or with
+    members of one parent storm on both sides, or a split of catalogue years
+    that no contiguous cut can make without splitting a block.
     """
 
 

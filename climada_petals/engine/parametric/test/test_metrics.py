@@ -27,6 +27,7 @@ import numpy as np
 
 from climada_petals.engine.parametric import (
     CalibrationResult,
+    CatalogueYears,
     CostOfCapitalLoad,
     ExpectedUncovered,
     ParametricInputError,
@@ -34,13 +35,12 @@ from climada_petals.engine.parametric import (
     WeightedCVaR,
     basis_risk,
     calibrate,
-    outcome_measure,
-    split_years,
+    holdout,
 )
 from climada_petals.engine.parametric.metrics import METRICS, subject_metrics
 from climada_petals.engine.parametric.pricing import Pricing
 from climada_petals.engine.parametric.test._synthetic import (
-    array_index,
+    array_sample,
     random_portfolio,
 )
 
@@ -49,16 +49,10 @@ class TestSubjectMetrics(unittest.TestCase):
     """Metrics of one subject, worked out by hand."""
 
     def test_two_years_of_ten(self) -> None:
-        index, _ = array_index(
+        sample, _ = array_sample(
             [[30.0], [60.0], [65.0]], [[4.0], [10.0], [2.0]], [0, 1, 1], 10
         )
-        measure = outcome_measure(
-            index.event_year,
-            index.frequency,
-            basis="annual",
-            years=index.years,
-            n_catalogue_years=10,
-        )
+        measure = sample.measure
         loss = np.array([4.0, 10.0, 2.0])
         paid = np.array([1.0, 12.0, 0.0])
         out = subject_metrics(loss, paid, measure, beta=0.85)
@@ -74,9 +68,8 @@ class TestSubjectMetrics(unittest.TestCase):
         self.assertEqual(set(out), set(METRICS))
 
     def test_flat_outcomes_have_no_correlation(self) -> None:
-        measure = outcome_measure(
-            [0, 1], [0.1, 0.1], basis="annual", years=range(10), n_catalogue_years=10
-        )
+        years = CatalogueYears.from_labels([1, 2], [0, 1], n_years=10)
+        measure = years.measure([1, 2], [0.1, 0.1])
         out = subject_metrics([4.0, 10.0], [0.0, 0.0], measure, beta=0.85)
         self.assertTrue(math.isnan(out["correlation"]))
         self.assertEqual(out["payout_to_loss_ratio"], 0.0)
@@ -88,29 +81,27 @@ class TestBasisRisk(unittest.TestCase):
     """Out-of-sample metrics of a cover."""
 
     def setUp(self) -> None:
-        self.index, self.impact = random_portfolio(5, n_events=60, n_years=90)
-        self.train, self.test = split_years(self.index, train_fraction=0.7)
+        sample, _ = random_portfolio(5, n_events=60, n_years=90)
+        self.train, self.test = holdout(sample, train_fraction=0.7)
 
     def _cover(self, scope: str, pricing: Pricing | None = None) -> CalibrationResult:
         kwargs: dict[str, Pricing] = {} if pricing is None else {"pricing": pricing}
         return calibrate(
-            self.index,
-            self.impact,
+            self.train,
             payout=StepPayout.uniform(20.0, 70.0, 4),
             objective=WeightedCVaR(alpha=0.9, beta=0.9),
-            basis="annual",
             scope=scope,
             budget=1.0,
-            years=self.train,
             **kwargs,
         )
 
     def test_individual_cover_on_the_test_years(self) -> None:
         cover = self._cover("individual")
-        frame = basis_risk(self.index, self.impact, cover, beta=0.9, years=self.test)
+        frame = basis_risk(self.test, cover, beta=0.9)
         self.assertEqual(frame["level"].tolist(), ["unit"] * 3 + ["portfolio"])
         self.assertTrue(frame["split_identified"].all())
-        self.assertEqual(int(frame["n_years"].iloc[0]), self.test.size)
+        self.assertEqual(int(frame["n_years"].iloc[0]), 27)
+        self.assertEqual((frame["basis"] == "annual").sum(), 4)
         units = frame[frame["level"] == "unit"]
         portfolio = frame[frame["level"] == "portfolio"].iloc[0]
         for name in ("expected_loss", "expected_payout", "premium"):
@@ -123,29 +114,36 @@ class TestBasisRisk(unittest.TestCase):
 
     def test_portfolio_cover_flags_its_unit_rows(self) -> None:
         cover = self._cover("portfolio", CostOfCapitalLoad(rate=0.1, q=0.9))
-        frame = basis_risk(self.index, self.impact, cover, beta=0.9, years=self.test)
+        frame = basis_risk(self.test, cover, beta=0.9)
         units = frame[frame["level"] == "unit"]
         self.assertFalse(units["split_identified"].any())
         self.assertTrue(np.isnan(np.asarray(units["premium"], dtype=float)).all())
         self.assertTrue(np.isfinite(frame["premium"].iloc[-1]))
 
-    def test_an_unknown_basis_raises(self) -> None:
+    def test_the_sample_is_checked(self) -> None:
         cover = self._cover("individual")
-        with self.assertRaisesRegex(ParametricInputError, "basis must be one of"):
-            basis_risk(self.index, self.impact, cover, beta=0.9, basis="season")
+        with self.assertRaisesRegex(ParametricInputError, "OutcomeSample"):
+            basis_risk(self.test.index, cover, beta=0.9)
+        other, _ = random_portfolio(5, n_events=60, n_units=2, n_years=90)
+        with self.assertRaisesRegex(ParametricInputError, "not the cover's"):
+            basis_risk(other, cover, beta=0.9)
+
+    def test_on_the_event_basis_n_years_is_null(self) -> None:
+        cover = self._cover("individual")
+        on_events, _ = random_portfolio(5, n_events=60, n_years=90, basis="event")
+        frame = basis_risk(on_events, cover, beta=0.9)
+        self.assertTrue((frame["basis"] == "event").all())
+        self.assertTrue(frame["n_years"].isna().all())
 
     def test_in_sample_metric_is_the_objective(self) -> None:
         cover = calibrate(
-            self.index,
-            self.impact,
+            self.train,
             payout=StepPayout.uniform(20.0, 70.0, 4),
             objective=ExpectedUncovered(),
-            basis="annual",
             scope="portfolio",
             budget=0.8,
-            years=self.train,
         )
-        frame = basis_risk(self.index, self.impact, cover, beta=0.9, years=self.train)
+        frame = basis_risk(self.train, cover, beta=0.9)
         self.assertAlmostEqual(
             frame["expected_uncovered"].iloc[-1],
             cover.problems[0].objective_value,

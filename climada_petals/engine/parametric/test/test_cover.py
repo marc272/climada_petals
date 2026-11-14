@@ -322,7 +322,7 @@ class TestParametricCover(unittest.TestCase):
 
     def test_payout_matrix_matches_units_by_id(self) -> None:
         values = [[20.0, 30.0, 61.0], [45.0, 25.0, 36.0], [0.0, 99.0, 50.0]]
-        index, _ = array_index(values, np.zeros((3, 3)), [0, 1, 2], 10)
+        index, _, _ = array_index(values, np.zeros((3, 3)))
         cover = _cover(
             unit_id=["U2", "U0"],
             payout={
@@ -361,7 +361,7 @@ class TestParametricCover(unittest.TestCase):
 
     def test_payout_matrix_needs_the_covers_definition(self) -> None:
         values = [[20.0, 30.0], [45.0, 25.0]]
-        on_wind, _ = array_index(values, np.zeros((2, 2)), [0, 1], 10)
+        on_wind, _, _ = array_index(values, np.zeros((2, 2)))
         cover = _cover(unit_id=["U0", "U1"], payout=StepPayout([30.0], [100.0]))
         np.testing.assert_array_equal(
             cover.payout_matrix(on_wind), [[0, 100], [100, 0]]
@@ -371,9 +371,7 @@ class TestParametricCover(unittest.TestCase):
             IndexDefinition("table", unit="m/s"),
             IndexDefinition("hazard", unit="m/s", index_stat="max", source="synthetic"),
         ):
-            index, _ = array_index(
-                values, np.zeros((2, 2)), [0, 1], 10, definition=other
-            )
+            index, _, _ = array_index(values, np.zeros((2, 2)), definition=other)
             with (
                 self.subTest(other=other),
                 self.assertRaisesRegex(ParametricInputError, "cover's definition"),
