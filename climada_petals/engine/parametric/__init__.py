@@ -88,11 +88,22 @@ from CLIMADA's ``Hazard``, ``TCTracks``, ``Exposures`` and ``Impact``:
   ``calc_freq_curve``, ``local_exceedance_impact`` and ``write_hdf5`` work
   on them. Plots: :func:`plot_payout`, :func:`plot_payout_vs_loss` and
   :func:`plot_exceedance`.
+* **Basis risk:** it comes from a stated source. The structural ones lead:
+  an index that is not the footprint at the assets (cat-in-a-circle,
+  another or a coarser hazard set, a table of readings) and units of
+  several points. :func:`index_diagnostics` measures, per unit, how far the
+  index determines the loss; :func:`calibrate` and :func:`evaluate` run it
+  and warn where it does almost one-to-one, so that basis risk would read
+  close to zero, and the tables mark such units (``comonotone_index``).
+  Impact-function draws come second (:func:`impact_function_draws`,
+  :meth:`OutcomeSample.from_impact_draws`): they widen the uncovered loss
+  but don't change which events pay or lose.
 
 The module depends only on CLIMADA, numpy, scipy, pandas and matplotlib.
 """
 
 from .annual import CatalogueYears, YearSets, sample_years
+from .basis_risk import impact_function_draws, index_diagnostics
 from .calibrate import (
     CalibrationOptions,
     CalibrationResult,
@@ -203,6 +214,8 @@ __all__ = [
     "compare",
     "evaluate",
     "holdout",
+    "impact_function_draws",
+    "index_diagnostics",
     "labels_from_names",
     "payout_impact",
     "plot_exceedance",

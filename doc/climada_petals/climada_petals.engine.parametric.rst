@@ -9,6 +9,14 @@ climada\_petals\.engine\.parametric\.\_design module
     :undoc-members:
     :show-inheritance:
 
+climada\_petals\.engine\.parametric\.\_draws module
+---------------------------------------------------
+
+.. automodule:: climada_petals.engine.parametric._draws
+    :members:
+    :undoc-members:
+    :show-inheritance:
+
 climada\_petals\.engine\.parametric\.\_grid module
 --------------------------------------------------
 
@@ -37,6 +45,14 @@ climada\_petals\.engine\.parametric\.annual module
 --------------------------------------------------
 
 .. automodule:: climada_petals.engine.parametric.annual
+    :members:
+    :undoc-members:
+    :show-inheritance:
+
+climada\_petals\.engine\.parametric\.basis\_risk module
+-------------------------------------------------------
+
+.. automodule:: climada_petals.engine.parametric.basis_risk
     :members:
     :undoc-members:
     :show-inheritance:

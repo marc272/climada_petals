@@ -112,11 +112,24 @@ Column                 Meaning
                        loss, so the weighted-CVaR design minimised ``E[U]``,
                        or ``"single_outcome"`` when ``1 - beta`` was at most
                        the weight of one outcome with a loss
-``comonotone_index``   Null: this version doesn't run index diagnostics
+``comonotone_index``   Whether the index determines the loss almost
+                       one-to-one on this sample (below): a unit's flag,
+                       on a total row true if every unit's is, false if
+                       some unit's is not, else null
 =====================  ===================================================
 
 External numbers come from out-of-sample rows on the annual basis.
 In-sample rows exist for the overfitting gap.
+
+Index diagnostics
+-----------------
+:func:`evaluate` and :func:`compare` run
+:func:`~climada_petals.engine.parametric.basis_risk.index_diagnostics` on
+the evaluation sample, at the default threshold, once per call. Where the
+index determines the loss almost one-to-one, a cover can replicate the
+loss and the basis-risk metrics read close to zero: such units log a
+warning and are marked in ``comonotone_index``. Null where the correlation
+is undefined, such as a unit whose index or loss takes one value.
 
 Designs
 -------
@@ -137,9 +150,9 @@ can coincide with the design sample's by chance.
 CLIMADA objects
 ---------------
 :func:`payout_impact` returns the payouts as a CLIMADA ``Impact``, and
-:func:`uncovered_impact` the uncovered losses ``(L_e - P_e)^+``, on the
-exposure points of the units: a unit's value maps back to its points by
-value share. Both are non-negative, so ``calc_freq_curve``, ``eai_exp``,
+:func:`uncovered_impact` the uncovered losses ``(L_e - P_e)^+``, of one
+draw on a sample with impact-function draws, on the exposure points of the
+units: a unit's value maps back to its points by value share. Both are non-negative, so ``calc_freq_curve``, ``eai_exp``,
 ``local_exceedance_impact`` and ``write_hdf5`` work on them unchanged. A
 signed net loss is not an ``Impact``: ``local_exceedance_impact`` would drop
 its negative part, and the premium, which is annual, has no place in an
@@ -167,6 +180,7 @@ from climada.engine import Impact
 from numpy.typing import NDArray
 
 from ._checks import check_int, check_real
+from .basis_risk import comonotone_of, diagnose
 from .calibrate import JOINT, CalibrationResult, DesignSample
 from .cover import ParametricCover
 from .errors import EventAlignmentError, ParametricInputError
@@ -216,13 +230,14 @@ class _Entry(NamedTuple):
 
 
 class _Context(NamedTuple):
-    """The checked arguments of one evaluation."""
+    """The checked arguments of one evaluation, and the sample's index diagnostics."""
 
     split: str
     fold: int
     pricing: Pricing
     premium: float | None
     options: MetricOptions
+    diagnostics: pd.DataFrame | None = None
 
 
 def _entry(entry: object, sample: OutcomeSample) -> _Entry:
@@ -489,7 +504,10 @@ def _row(
         "unique": found.unique,
         "ties": found.ties,
         "degenerate_tail": subject.degenerate,
-        "comonotone_index": None,
+        "comonotone_index": comonotone_of(
+            context.diagnostics,
+            sample.unit_id if subject.unit_id is None else [subject.unit_id],
+        ),
         "premium": math.nan if subject.premium is None else subject.premium,
         "premium_repriced": math.nan if subject.repriced is None else subject.repriced,
         **metrics,
@@ -572,6 +590,14 @@ def evaluate(
     """
     found = _entry(entry, _check_sample(sample))
     context = _context(found, sample, split, fold, (pricing, premium, options))
+    return _table(
+        found, sample, context._replace(diagnostics=diagnose(sample, "evaluate"))
+    )
+
+
+def _table(found: _Entry, sample: OutcomeSample, context: _Context) -> pd.DataFrame:
+    """Return the table of a checked evaluation."""
+    options = context.options
     rows = sample.event_row
     payouts = (
         found.pay(sample.index)[rows],
@@ -598,7 +624,8 @@ def compare(
 ) -> pd.DataFrame:
     """Return the metrics of several covers or designs on one sample, in one table.
 
-    Each entry's rows are :func:`evaluate`'s, in the order of ``entries``.
+    Each entry's rows are :func:`evaluate`'s, in the order of ``entries``;
+    the index diagnostics run once.
     The table ranks nothing and marks no entry as best. The ``scope`` column
     keeps the rows of each scope apart, and makes no statement about them.
 
@@ -648,12 +675,15 @@ def compare(
                 f"allocation={options.allocation!r} takes joint designs only; the "
                 f"entries at {others} are not"
             )
-    tables = [
-        evaluate(
-            entry, sample, split=split, fold=fold, pricing=pricing, options=options
-        )
-        for entry in entries
-    ]
+    checked = _check_sample(sample)
+    diagnostics = None
+    tables = []
+    for entry in entries:
+        found = _entry(entry, checked)
+        context = _context(found, checked, split, fold, (pricing, None, options))
+        if diagnostics is None:
+            diagnostics = diagnose(checked, "compare")
+        tables.append(_table(found, checked, context._replace(diagnostics=diagnostics)))
     return pd.concat(tables, ignore_index=True)
 
 
@@ -798,24 +828,54 @@ def payout_impact(
     return _as_impact(sample, found.pay(sample.index), impact, found.cover.payout_unit)
 
 
+def _draw_rows(sample: OutcomeSample, draw: object) -> slice:
+    """Return the rows of one draw of the sample, checked.
+
+    Raises
+    ------
+    ParametricInputError
+        If ``draw`` is missing on a sample with draws, or not one of its
+        draws.
+    """
+    if draw is None:
+        if sample.n_draws != 1:
+            raise ParametricInputError(
+                f"the sample has {sample.n_draws} draws of each event's loss, and an "
+                "Impact one loss per event: pass draw=, the draw to return"
+            )
+        return slice(0, sample.n_events)
+    chosen = check_int("draw", draw, low=0)
+    if chosen >= sample.n_draws:
+        raise ParametricInputError(
+            f"draw must be below the sample's {sample.n_draws} draws, got {chosen}"
+        )
+    return slice(chosen * sample.n_events, (chosen + 1) * sample.n_events)
+
+
 def uncovered_impact(
     entry: ParametricCover | CalibrationResult,
     sample: OutcomeSample,
     *,
     impact: Any = None,
+    draw: int | None = None,
 ) -> Impact:
     """Return the uncovered losses on a sample as a CLIMADA ``Impact``.
 
     ``imp_mat`` holds ``(L_{e,j} - P_{e,j})^+``, the shortfall of each unit
     ``j`` in each event, shared among the unit's points by value share, as
     :func:`payout_impact` shares the payouts. ``aai_agg`` is the sum over
-    the units of their ``expected_uncovered``.
+    the units of their ``expected_uncovered``; on a sample with draws, that
+    of one draw, whose mean over the draws is the sum on the event basis.
 
     Parameters
     ----------
     entry, sample, impact
-        As in :func:`payout_impact`. A sample with impact-function draws,
-        which has one loss per draw, is refused.
+        As in :func:`payout_impact`. On a sample with impact-function
+        draws, ``impact`` is the given draw's loss ``Impact``.
+    draw : int, optional
+        On a sample with impact-function draws, the draw whose uncovered
+        losses to return, from 0; its events have their own frequencies.
+        Required there; on a sample without draws, None or 0.
 
     Returns
     -------
@@ -824,16 +884,13 @@ def uncovered_impact(
     Raises
     ------
     ParametricInputError
-        As :func:`payout_impact`, and if the sample has draws.
+        As :func:`payout_impact`, and if ``draw`` is missing on a sample
+        with draws or not one of its draws.
     ImpactInputError, EventAlignmentError
         As :func:`payout_impact`.
     """
     found = _entry(entry, _check_sample(sample))
     _check_left_out(found, sample)
-    if sample.n_draws != 1:
-        raise ParametricInputError(
-            f"the sample has {sample.n_draws} draws of each event's loss, and an "
-            "Impact one loss per event: evaluate the draws in the table instead"
-        )
-    shortfall = np.maximum(sample.loss.toarray() - found.pay(sample.index), 0.0)
+    rows = _draw_rows(sample, draw)
+    shortfall = np.maximum(sample.loss[rows].toarray() - found.pay(sample.index), 0.0)
     return _as_impact(sample, shortfall, impact, found.cover.payout_unit)

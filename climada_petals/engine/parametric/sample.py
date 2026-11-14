@@ -72,6 +72,7 @@ both splits run it on their sides.
 from __future__ import annotations
 
 import math
+from collections.abc import Sequence
 from dataclasses import dataclass, field
 from typing import Any, Final, NamedTuple
 
@@ -83,6 +84,7 @@ from numpy.typing import ArrayLike, NDArray
 from climada_petals.util.config import LOGGER
 
 from ._checks import check_int, check_real, finite_array, read_only
+from ._draws import ImpactLosses, impact_losses, take_events
 from .annual import CatalogueYears, YearSets, sample_years
 from .errors import LeakageError, ParametricInputError
 from .index import ParametricIndex
@@ -295,36 +297,75 @@ class OutcomeSample:
             index.
         """
         _check_parts(index, units, basis)
-        units.check_impact(impact)
-        rows = index.rows_in(impact)
-        loss = units.aggregate(impact.imp_mat)[rows]
-        frequency = np.asarray(impact.frequency, dtype=np.float64)[rows]
-        keep = (np.asarray(abs(loss).sum(axis=1)).reshape(-1) > 0) | np.any(
-            index.values != 0, axis=1
-        )
-        if index.definition.tail == "lower":
-            keep[:] = True
-        if not keep.any():
-            raise ParametricInputError(
-                "no event of the impact has a loss or a non-zero index"
-            )
-        left_out = int((~keep).sum())
-        if left_out:
-            LOGGER.info(
-                "outcome sample: %d of %d events have no loss and an index of 0 at "
-                "every unit, and are left out",
-                left_out,
-                keep.size,
-            )
-        kept = np.flatnonzero(keep)
+        return cls._of(impact_losses(index, [impact], units), units, basis, scenario)
+
+    @classmethod
+    def from_impact_draws(
+        cls,
+        index: ParametricIndex,
+        impacts: Sequence[Any],
+        *,
+        units: InsuredUnits,
+        basis: Basis,
+        scenario: str = "baseline",
+    ) -> OutcomeSample:
+        """Build a sample from an index and one ``Impact`` per impact-function draw.
+
+        Each impact is the loss of one draw of the impact functions, on the
+        same hazard set (:mod:`~climada_petals.engine.parametric.basis_risk`,
+        which says what draws can and can't do). The index is the same in
+        every draw. An event is kept if it has a loss in some draw or a
+        non-zero index at some unit, as in :meth:`from_impact`.
+
+        Parameters
+        ----------
+        index : ParametricIndex
+            As in :meth:`from_impact`.
+        impacts : sequence of climada.engine.Impact
+            One loss per draw, each computed with ``save_mat=True`` on the
+            units' exposure points, with the index's events in any order and
+            the same frequencies and loss unit, e.g. one ``ImpactCalc`` per
+            set of ``impact_function_draws``.
+        units, basis, scenario
+            As in :meth:`from_impact`.
+
+        Returns
+        -------
+        OutcomeSample
+            With ``n_draws`` the number of impacts: one row per draw and kept
+            event, ordered by draw, then event, each with frequency
+            ``f_e / n_draws``. On an annual route an outcome is a year in one
+            draw.
+
+        Raises
+        ------
+        EventAlignmentError
+            If an impact's events are not the index's, or two impacts'
+            frequencies differ; the error's note names the draw.
+        ImpactInputError
+            As in :meth:`from_impact`, for any impact, or if the impacts'
+            loss units differ.
+        YearRouteError, ParametricInputError
+            As in :meth:`from_impact`, and if ``impacts`` is not a non-empty
+            sequence.
+        """
+        _check_parts(index, units, basis)
+        return cls._of(impact_losses(index, impacts, units), units, basis, scenario)
+
+    @classmethod
+    def _of(
+        cls, found: ImpactLosses, units: InsuredUnits, basis: Basis, scenario: str
+    ) -> OutcomeSample:
+        """Return the sample of the kept events of one or several impacts."""
         return cls(
-            _take(index, kept),
-            loss[kept],
-            frequency[kept],
+            found.index,
+            found.loss,
+            found.frequency,
             units,
             basis,
+            n_draws=found.n_draws,
             scenario=scenario,
-            n_left_out=left_out,
+            n_left_out=found.n_left_out,
         )
 
     @property
@@ -766,18 +807,6 @@ def _loss(loss: Any, shape: tuple[int, int]) -> sp.csr_matrix:
     return matrix
 
 
-def _take(index: ParametricIndex, rows: NDArray[np.intp]) -> ParametricIndex:
-    """Return the index of the events at ``rows``."""
-    names = index.event_name
-    return ParametricIndex(
-        index.values[rows],
-        index.event_id[rows],
-        index.unit_id,
-        index.definition,
-        event_name=None if names is None else [names[row] for row in rows],
-    )
-
-
 def _part(
     sample: OutcomeSample,
     chosen: NDArray[np.bool_],
@@ -800,7 +829,7 @@ def _part(
             f"{split.fold}) holds no event"
         )
     return OutcomeSample(
-        _take(sample.index, np.flatnonzero(chosen)),
+        take_events(sample.index, np.flatnonzero(chosen)),
         sample.loss[np.tile(chosen, sample.n_draws)],
         frequency,
         sample.units,
