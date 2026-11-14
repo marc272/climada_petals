@@ -34,7 +34,8 @@ import unittest
 from typing import Any
 
 import numpy as np
-from climada.hazard import TCTracks
+import scipy.sparse as sp
+from climada.hazard import Hazard, TCTracks
 
 from climada_petals.engine.parametric import (
     ExpectedUncovered,
@@ -47,6 +48,7 @@ from climada_petals.engine.parametric import (
 )
 from climada_petals.engine.parametric.calibrate import loss_matrix
 from climada_petals.engine.parametric.test._synthetic import (
+    POINTS,
     array_index,
     catalogue_tracks,
     exposures,
@@ -76,6 +78,33 @@ class TestFromClimada(unittest.TestCase):
         np.testing.assert_array_equal(
             loss_matrix(index, self.impact), self.impact.imp_mat.toarray()
         )
+
+    def test_years_can_be_given(self) -> None:
+        index = ParametricIndex.from_hazard(
+            self.hazard, self.exposures, years=range(2000, 2005)
+        )
+        np.testing.assert_array_equal(index.years, np.arange(2000, 2005))
+        np.testing.assert_array_equal(index.event_year, [2001, 2003, 2003])
+
+    def test_an_exposure_point_without_a_centroid_raises(self) -> None:
+        far = exposures([*POINTS, (0.0, 0.0, 1.0e9)])
+        with self.assertRaisesRegex(ParametricInputError, "no hazard centroid"):
+            ParametricIndex.from_hazard(self.hazard, far)
+
+    def test_a_hazard_without_events_raises(self) -> None:
+        empty = Hazard(
+            haz_type="TC",
+            units="m/s",
+            centroids=self.hazard.centroids,
+            event_id=np.array([], dtype=int),
+            event_name=[],
+            frequency=np.array([]),
+            date=np.array([], dtype=int),
+            intensity=sp.csr_matrix((0, self.hazard.centroids.size)),
+            fraction=sp.csr_matrix((0, self.hazard.centroids.size)),
+        )
+        with self.assertRaisesRegex(ParametricInputError, "the hazard has no events"):
+            ParametricIndex.from_hazard(empty, self.exposures)
 
     def test_an_impact_of_other_events_is_refused(self) -> None:
         index = ParametricIndex.from_hazard(self.hazard, self.exposures)
@@ -317,6 +346,35 @@ class TestParametricIndex(unittest.TestCase):
             index.check_years([3, 3])
         with self.assertRaises(ParametricInputError):
             index.check_years([42])
+
+    def test_inconsistent_fields_raise(self) -> None:
+        index, _ = array_index(np.zeros((2, 2)), np.zeros((2, 2)), [0, 1], 10)
+        fields = {
+            "values": index.values,
+            "event_id": index.event_id,
+            "event_name": index.event_name,
+            "frequency": index.frequency,
+            "event_year": index.event_year,
+            "years": index.years,
+            "unit_id": index.unit_id,
+            "coords": index.coords,
+        }
+        self.assertEqual((index.n_events, index.n_units), (2, 2))
+        bad = [
+            ({"event_id": [1]}, "event_id has 1 entries for 2 events"),
+            ({"event_id": [1, 1]}, "event_id must be unique"),
+            ({"frequency": [0.1, 0.0]}, "frequency must be > 0"),
+            ({"years": []}, "years must be non-empty and unique"),
+            ({"years": [0, 1, 1]}, "years must be non-empty and unique"),
+            ({"unit_id": ("U0", "U0")}, "unique ids"),
+            ({"coords": np.zeros((2, 3))}, "coords must have shape"),
+        ]
+        for change, match in bad:
+            with (
+                self.subTest(change=change),
+                self.assertRaisesRegex(ParametricInputError, match),
+            ):
+                ParametricIndex(**{**fields, **change})
 
 
 if __name__ == "__main__":

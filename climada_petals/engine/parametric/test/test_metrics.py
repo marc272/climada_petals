@@ -29,6 +29,7 @@ from climada_petals.engine.parametric import (
     CostOfCapitalLoad,
     ExpectedUncovered,
     ParametricCover,
+    ParametricInputError,
     StepPayout,
     WeightedCVaR,
     basis_risk,
@@ -71,6 +72,16 @@ class TestSubjectMetrics(unittest.TestCase):
         self.assertAlmostEqual(out["rmse_residual"], math.sqrt(0.9))
         self.assertAlmostEqual(out["payout_to_loss_ratio"], 1.3 / 1.6)
         self.assertEqual(set(out), set(METRICS))
+
+    def test_flat_outcomes_have_no_correlation(self) -> None:
+        measure = outcome_measure(
+            [0, 1], [0.1, 0.1], basis="annual", years=range(10), n_catalogue_years=10
+        )
+        out = subject_metrics([4.0, 10.0], [0.0, 0.0], measure, beta=0.85)
+        self.assertTrue(math.isnan(out["correlation"]))
+        self.assertEqual(out["payout_to_loss_ratio"], 0.0)
+        out = subject_metrics([0.0, 0.0], [1.0, 2.0], measure, beta=0.85)
+        self.assertTrue(math.isnan(out["payout_to_loss_ratio"]))
 
 
 class TestBasisRisk(unittest.TestCase):
@@ -117,6 +128,11 @@ class TestBasisRisk(unittest.TestCase):
         self.assertFalse(units["split_identified"].any())
         self.assertTrue(np.isnan(np.asarray(units["premium"], dtype=float)).all())
         self.assertTrue(np.isfinite(frame["premium"].iloc[-1]))
+
+    def test_an_unknown_basis_raises(self) -> None:
+        cover = self._cover("individual")
+        with self.assertRaisesRegex(ParametricInputError, "basis must be one of"):
+            basis_risk(self.index, self.impact, cover, beta=0.9, basis="season")
 
     def test_in_sample_metric_is_the_objective(self) -> None:
         cover = calibrate(

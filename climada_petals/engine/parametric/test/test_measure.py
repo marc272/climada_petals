@@ -25,6 +25,7 @@ import unittest
 import numpy as np
 
 from climada_petals.engine.parametric import (
+    OutcomeMeasure,
     ParametricInputError,
     outcome_measure,
     var_cvar,
@@ -81,6 +82,61 @@ class TestAnnualMeasure(unittest.TestCase):
             )
 
 
+class TestOutcomeMeasure(unittest.TestCase):
+    """The measure's own checks, and the checks of its builder."""
+
+    def test_invalid_fields_raise(self) -> None:
+        good = {
+            "basis": "annual",
+            "outcome_of_event": [0, 1],
+            "probability": [0.5, 0.5],
+            "n_years": 2,
+        }
+        self.assertEqual(OutcomeMeasure(**good).n_outcomes, 2)
+        cases = [
+            ({"basis": "season"}, "basis must be one of"),
+            ({"probability": []}, "non-empty and >= 0"),
+            ({"probability": [1.5, -0.5]}, "non-empty and >= 0"),
+            ({"probability": [0.5, 0.4]}, "must sum to 1"),
+            ({"outcome_of_event": [0, 2]}, "must lie in"),
+        ]
+        for change, match in cases:
+            with (
+                self.subTest(change=change),
+                self.assertRaisesRegex(ParametricInputError, match),
+            ):
+                OutcomeMeasure(**{**good, **change})
+
+    def test_aggregate_needs_one_row_per_event(self) -> None:
+        measure = OutcomeMeasure("annual", [0, 1], [0.5, 0.5], 2)
+        np.testing.assert_allclose(
+            measure.aggregate([[1.0, 2.0], [3.0, 4.0]]), [[1.0, 2.0], [3.0, 4.0]]
+        )
+        with self.assertRaisesRegex(ParametricInputError, "2 rows"):
+            measure.aggregate([1.0, 2.0, 3.0])
+
+    def test_invalid_arguments_raise(self) -> None:
+        good = {
+            "event_year": [0, 1],
+            "frequency": [0.1, 0.1],
+            "basis": "annual",
+            "years": range(10),
+            "n_catalogue_years": 10,
+        }
+        cases = [
+            ({"basis": "season"}, "basis must be one of"),
+            ({"event_year": [], "frequency": []}, "without events"),
+            ({"frequency": [0.1]}, "one value > 0 per event"),
+            ({"frequency": [0.1, 0.0]}, "one value > 0 per event"),
+        ]
+        for change, match in cases:
+            with (
+                self.subTest(change=change),
+                self.assertRaisesRegex(ParametricInputError, match),
+            ):
+                outcome_measure(**{**good, **change})
+
+
 class TestEventMeasure(unittest.TestCase):
     """One outcome per event, plus "no event"."""
 
@@ -94,6 +150,13 @@ class TestEventMeasure(unittest.TestCase):
         )
         np.testing.assert_allclose(measure.probability, [0.1, 0.1, 0.1, 0.7])
         np.testing.assert_array_equal(measure.outcome_of_event, [0, 1, 2])
+
+    def test_frequencies_summing_to_one_leave_no_other_outcome(self) -> None:
+        measure = outcome_measure(
+            [0, 1], [0.5, 0.5], basis="event", years=[0, 1], n_catalogue_years=2
+        )
+        np.testing.assert_allclose(measure.probability, [0.5, 0.5])
+        self.assertEqual(measure.basis, "event")
 
     def test_more_than_one_event_per_year_raises(self) -> None:
         with self.assertRaisesRegex(ParametricInputError, "annual basis"):
@@ -126,6 +189,12 @@ class TestVarCvar(unittest.TestCase):
             var_cvar([1.0], [1.0], 1.0)
         with self.assertRaises(ParametricInputError):
             var_cvar([1.0, 2.0], [0.5, 0.6], 0.5)
+        for values, prob in (([], []), ([1.0, 2.0], [1.0]), ([1.0], [-1.0])):
+            with (
+                self.subTest(values=values, prob=prob),
+                self.assertRaisesRegex(ParametricInputError, "non-empty"),
+            ):
+                var_cvar(values, prob, 0.5)
 
 
 if __name__ == "__main__":

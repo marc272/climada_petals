@@ -20,6 +20,7 @@ Tests of the calibration: hand-worked designs, the LP against numpy, the scopes.
 
 from __future__ import annotations
 
+import copy
 import importlib.util
 import itertools
 import unittest
@@ -27,6 +28,7 @@ from types import SimpleNamespace
 from unittest import mock
 
 import numpy as np
+import scipy.sparse as sp
 from climada.engine import Impact
 from numpy.typing import ArrayLike, NDArray
 
@@ -45,12 +47,14 @@ from climada_petals.engine.parametric import (
     calibrate,
     outcome_measure,
 )
+from climada_petals.engine.parametric.calibrate import loss_matrix
 from climada_petals.engine.parametric.measure import OutcomeMeasure
 from climada_petals.engine.parametric.payout import BelowAttachment
 from climada_petals.engine.parametric.test._synthetic import (
     array_index,
     random_portfolio,
 )
+from climada_petals.util.config import LOGGER
 
 HAS_CVXPY = importlib.util.find_spec("cvxpy") is not None
 PAYOUT = StepPayout(attachment=20.0, limit=70.0, n_steps=4)
@@ -229,6 +233,23 @@ class TestLinearProgram(unittest.TestCase):
             rtol=1e-7,
         )
 
+    def test_a_tail_within_one_outcome_is_recorded_and_logged(self) -> None:
+        # 60 years: one outcome has probability 1/60, more than 1 - beta.
+        index, impact = random_portfolio(2)
+        with self.assertLogs(LOGGER, "WARNING") as logs:
+            cover = calibrate(
+                index,
+                impact,
+                payout=PAYOUT,
+                objective=WeightedCVaR(alpha=0.9, beta=0.99),
+                basis="annual",
+                scope="portfolio",
+                budget=0.5,
+            )
+        self.assertTrue(cover.problems[0].diagnostics["tail_within_one_outcome"])
+        self.assertTrue(cover.summary()["tail_within_one_outcome"].all())
+        self.assertIn("single worst outcome", "\n".join(logs.output))
+
     def test_a_failed_solve_raises(self) -> None:
         index, impact = random_portfolio(0)
         failed = SimpleNamespace(status=4, message="numerical trouble", x=None, nit=0)
@@ -329,6 +350,42 @@ class TestCover(unittest.TestCase):
         self.assertEqual(summary["problem_id"].tolist(), ["portfolio"])
         self.assertIn("degenerate_tail", summary.columns)
 
+    def test_a_cover_checks_its_levels_and_scope(self) -> None:
+        fields = {
+            "payout": PAYOUT,
+            "objective": ExpectedUncovered(),
+            "pricing": PurePremium(),
+            "scope": "individual",
+            "basis": "annual",
+            "budget": None,
+            "unit_id": ("U0", "U1"),
+            "levels": np.zeros((2, PAYOUT.n_steps)),
+            "problems": (),
+            "calibration_years": np.arange(3),
+        }
+        cover = ParametricCover(**fields)
+        self.assertFalse(cover.levels.flags.writeable)
+        self.assertEqual(cover.premium, 0.0)
+        with self.assertRaisesRegex(ParametricInputError, "levels must have shape"):
+            ParametricCover(**{**fields, "levels": np.zeros((2, 1))})
+        with self.assertRaisesRegex(ParametricInputError, "scope must be one of"):
+            ParametricCover(**{**fields, "scope": "cluster"})
+
+    def test_payouts_need_the_covers_units(self) -> None:
+        other, _ = array_index(np.zeros((2, 3)), np.zeros((2, 3)), [0, 1], 10)
+        other = ParametricIndex(
+            values=other.values,
+            event_id=other.event_id,
+            event_name=other.event_name,
+            frequency=other.frequency,
+            event_year=other.event_year,
+            years=other.years,
+            unit_id=("A", "B", "C"),
+            coords=other.coords,
+        )
+        with self.assertRaisesRegex(ParametricInputError, "not the cover's"):
+            self.cover.payout_matrix(other)
+
     def test_training_years_only(self) -> None:
         train = np.arange(20)
         cover = calibrate(
@@ -359,6 +416,33 @@ class TestInputs(unittest.TestCase):
         for change in bad:
             with self.subTest(change=change), self.assertRaises(ParametricInputError):
                 calibrate(index, impact, **{**good, **change})
+
+    def test_index_and_payout_types_are_checked(self) -> None:
+        index, impact = random_portfolio(0)
+        good = {"payout": PAYOUT, "objective": ExpectedUncovered(), "basis": "annual"}
+        with self.assertRaisesRegex(ParametricInputError, "ParametricIndex"):
+            calibrate(index.values, impact, **good)
+        with self.assertRaisesRegex(ParametricInputError, "StepPayout"):
+            calibrate(index, impact, **{**good, "payout": (20.0, 70.0, 4)})
+
+    def test_an_impact_that_does_not_match_the_index_is_refused(self) -> None:
+        index, impact = array_index([[30.0], [60.0]], [[4.0], [10.0]], [0, 1], 10)
+        np.testing.assert_array_equal(loss_matrix(index, impact), [[4.0], [10.0]])
+        changes = {
+            "event_id": ({"event_id": np.array([1, 3])}, "event_id"),
+            "frequency": ({"frequency": np.array([0.1, 0.2])}, "frequencies"),
+            "coord_exp": ({"coord_exp": np.array([[25.0, -70.0]])}, "coord_exp"),
+            "loss": ({"imp_mat": sp.csr_matrix([[4.0], [-1.0]])}, "negative"),
+        }
+        for name, (change, match) in changes.items():
+            other = copy.deepcopy(impact)
+            for attribute, value in change.items():
+                setattr(other, attribute, value)
+            with (
+                self.subTest(name=name),
+                self.assertRaisesRegex(ParametricInputError, match),
+            ):
+                loss_matrix(index, other)
 
     def test_years_without_events_raise(self) -> None:
         index, impact = array_index([[30.0]], [[1.0]], [0], 10)

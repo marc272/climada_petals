@@ -81,6 +81,8 @@ class TestStepPayout(unittest.TestCase):
             {"attachment": 0.0, "limit": 2.0, "n_steps": 2, "breakpoints": (0, 3, 2)},
             {"attachment": 0.0, "limit": 2.0, "n_steps": 2, "breakpoints": (1, 1.5, 2)},
             {"attachment": 0.0, "limit": 1.0, "n_steps": 2, "below_attachment": "x"},
+            {"attachment": 0.0, "limit": 1e-13, "n_steps": 1},
+            {"attachment": 0.0, "limit": 2.0, "n_steps": 2, "breakpoints": ("a",) * 3},
         ]
         for kwargs in bad:
             with self.subTest(kwargs=kwargs), self.assertRaises(ParametricInputError):

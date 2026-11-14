@@ -60,6 +60,17 @@ class TestCatInCircleHelpers(unittest.TestCase):
         np.testing.assert_array_equal(out[0][[0, 6, 12]], lat)
         np.testing.assert_allclose(out[2][6:], np.linspace(90, 30, 7), atol=1e-12)
 
+    def test_densify_refuses_inconsistent_tracks(self) -> None:
+        with self.assertRaisesRegex(ParametricInputError, "one length"):
+            densify_track(np.zeros(3), np.zeros(2), np.zeros(3), np.arange(3.0), 0.5)
+        with self.assertRaisesRegex(ParametricInputError, "increase strictly"):
+            densify_track(
+                np.zeros(3), np.zeros(3), np.zeros(3), np.array([0.0, 1.0, 1.0]), 0.5
+            )
+        # A single point is returned as it is.
+        out = densify_track(np.ones(1), np.ones(1), np.ones(1), np.zeros(1), 0.5)
+        self.assertEqual([len(part) for part in out], [1, 1, 1])
+
 
 class TestCatInCircle(unittest.TestCase):
     """The cat-in-a-circle builder on a TropCyclone hazard and its tracks."""
@@ -107,6 +118,45 @@ class TestCatInCircle(unittest.TestCase):
         )
         np.testing.assert_allclose(index.values[0], 120.5 / 1.9438444924406)
         self.assertEqual(index.unit, "m/s")
+
+    def test_other_breakpoints_give_plain_categories(self) -> None:
+        index = ParametricIndex.from_cat_in_circle(
+            self.tracks,
+            self.exposures,
+            hazard=self.hazard,
+            radius_km=30.0,
+            breakpoints_kn=(100.0,),
+        )
+        np.testing.assert_array_equal(index.values, [[1, 1, 1], [0, 0, 0], [0, 0, 0]])
+        self.assertEqual(index.unit, "category")
+
+    def test_invalid_parameters_raise(self) -> None:
+        cases = [
+            ({"radius_km": 0.0}, "radius_km"),
+            ({"metric": "wind"}, "metric must be"),
+            ({"breakpoints_kn": ()}, "breakpoints_kn must be"),
+            ({"breakpoints_kn": (83.0, 64.0)}, "breakpoints_kn must be"),
+            ({"breakpoints_kn": (0.0, 64.0)}, "breakpoints_kn must be"),
+            ({"track_step_hours": 0.0}, "track_step_hours"),
+        ]
+        for change, match in cases:
+            with (
+                self.subTest(change=change),
+                self.assertRaisesRegex(ParametricInputError, match),
+            ):
+                ParametricIndex.from_cat_in_circle(
+                    self.tracks,
+                    self.exposures,
+                    hazard=self.hazard,
+                    **{"radius_km": 30.0, **change},
+                )
+
+    def test_two_tracks_with_one_sid_raise(self) -> None:
+        twice = TCTracks([*self.tracks.data, self.tracks.data[0].copy()])
+        with self.assertRaisesRegex(ParametricInputError, "two tracks have the sid"):
+            ParametricIndex.from_cat_in_circle(
+                twice, self.exposures, hazard=self.hazard, radius_km=30.0
+            )
 
     def test_events_need_their_track(self) -> None:
         with self.assertRaisesRegex(ParametricInputError, "no track"):
