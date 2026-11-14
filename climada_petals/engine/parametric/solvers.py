@@ -98,6 +98,7 @@ from scipy.optimize import linprog
 
 from climada_petals.util.config import LOGGER
 
+from .constraints import violation
 from .errors import (
     CalibrationError,
     CalibrationLimitError,
@@ -106,7 +107,6 @@ from .errors import (
     UnboundedCalibrationError,
 )
 from .measure import OutcomeMeasure
-from .constraints import violation
 from .objectives import MSE, Objective, WeightedCVaR
 from .parameters import AmountConstraints
 from .pricing import CostOfCapitalLoad, Pricing

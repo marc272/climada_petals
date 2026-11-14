@@ -655,6 +655,32 @@ class TestTemplateRoute(unittest.TestCase):
         paid = result.cover.payout_matrix(self.sample.index)
         self.assertLessEqual(float(paid.max()), 300.0)
 
+    def test_a_sample_with_draws(self) -> None:
+        # Two identical draws of every event: the same outcomes, the same design.
+        drawn = OutcomeSample(
+            self.sample.index,
+            np.vstack([self.sample.loss.toarray()] * 2),
+            self.sample.frequency,
+            self.sample.units,
+            self.sample.basis,
+            n_draws=2,
+        )
+        results = [
+            calibrate(
+                template(sample, PAYOUT),
+                sample,
+                WeightedCVaR(alpha=0.9, beta=0.9),
+                scope="joint",
+                budget=Budget(ratio=0.8),
+                options=CalibrationOptions(lp_method="highs"),
+            )
+            for sample in (self.sample, drawn)
+        ]
+        self.assertAlmostEqual(
+            results[0].objective_value, results[1].objective_value, delta=1e-9
+        )
+        self.assertEqual(results[1].design_sample.n_draws, 2)
+
     def test_without_a_budget_the_limit_bounds_the_amounts(self) -> None:
         sample = _hand_example()
         result = calibrate(
