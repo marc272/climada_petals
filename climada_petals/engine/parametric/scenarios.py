@@ -110,7 +110,9 @@ index definition, and so every table, is the same for both.
 Splits and leakage
 ------------------
 Split the members, not a mixture: :meth:`ScenarioSet.holdout` splits each
-member and returns a training and a test set with the same labels. On an
+member and returns a training and a test set with the same labels; members
+of one source, such as a baseline and its frequency-scaled set, are cut
+with the same blocks. On an
 annual route a split of the mixture itself would not mix the members'
 sides (on year sets, one year would hold the events of several members),
 so ``holdout``, ``year_block_kfold`` and ``select`` raise
@@ -120,16 +122,26 @@ other.
 
 :func:`evaluate_scenarios` checks an out-of-sample evaluation of a design
 for leakage as :func:`~climada_petals.engine.parametric.evaluate.evaluate`
-does: against every sample, or member of a mixture, that was cut from
-another; and a design on a mixture against the mixture of its scenario's
-other sides. The members of a mixture are different hazard sets, whose
-event ids and blocks say nothing about each other, so the mixture keeps
-them apart (:mod:`~climada_petals.engine.parametric._mixture`): the same
-storm in two members counts as two blocks.
+does, by the samples' source tokens
+(:func:`~climada_petals.engine.parametric.sample.check_out_of_sample`):
+every scenario's sample, and every member of a mixture, of the design
+sample's source is compared with it, whether whole or cut. A mixture has
+the token of its members' tokens, so a design on a mixture is compared
+with the mixtures of the same members' sides, or of the whole members. The
+members of a mixture are different hazard sets, whose event ids and blocks
+say nothing about each other, so the mixture keeps them apart
+(:mod:`~climada_petals.engine.parametric._mixture`): the same storm in two
+members counts as two blocks.
 
 A set scaled by ``apply_climate_scenario_knu`` holds its baseline's events:
-a design calibrated on the baseline has seen every footprint of it, and its
-rows there show the cover under other frequencies, not on unseen events.
+a design calibrated on the baseline has seen every footprint of it. It has
+the baseline's source token (the token identifies the events, not their
+frequencies, exposures or impact functions), so an out-of-sample
+evaluation of a baseline design on it is compared, and raises on the
+events the design was calibrated on. :meth:`ScenarioSet.holdout` cuts the
+members of one source with the same blocks, so a design on the baseline's
+training side is out of sample on the scaled set's test side, which shows
+the cover under other frequencies on unseen events.
 """
 
 from __future__ import annotations
@@ -152,6 +164,7 @@ from ._mixture import (
     scenario_members,
     where,
 )
+from ._parts import aligned_sides
 from .calibrate import CalibrationOptions, CalibrationResult, DesignSample, calibrate
 from .constraints import Budget
 from .cover import IndexDefinition, ParametricCover
@@ -161,7 +174,7 @@ from .index import ParametricIndex
 from .metrics import MetricOptions
 from .objectives import Objective
 from .pricing import Pricing, PurePremium
-from .sample import Basis, OutcomeSample, check_no_leakage, holdout
+from .sample import Basis, OutcomeSample, check_no_leakage, check_out_of_sample, holdout
 from .units import InsuredUnits
 
 __all__ = [
@@ -472,9 +485,17 @@ class ScenarioSet:
 
         Each member is split by
         :func:`~climada_petals.engine.parametric.sample.holdout`, in the
-        order of the labels and members, with the same ``rng``. The two
-        sets have the labels of this one, and each scenario its members'
-        sides, so a mixture stays a mixture of its members' sides.
+        order of the labels and members, with the same ``rng``, except a
+        member with the source token of a member split before it: a set
+        scaled by ``apply_climate_scenario_knu`` and its baseline, say, hold
+        the same events. Such a member is cut with the blocks of the first
+        one's sides (on catalogue years, its years), so that each side holds
+        the same events in both, and a design on one side is out of sample
+        on the other side of every such member. Its frequencies are divided
+        by its own share on each side, and on year sets its years are
+        sampled from its side's events. The two sets have the labels of
+        this one, and each scenario its members' sides, so a mixture stays
+        a mixture of its members' sides.
 
         Parameters
         ----------
@@ -494,13 +515,23 @@ class ScenarioSet:
         ParametricInputError, LeakageError
             As :func:`~climada_petals.engine.parametric.sample.holdout`; the
             error's note names the scenario and the member.
+        ScenarioError
+            If a member with the source token of an earlier one can't be
+            cut with its blocks: other simulation years, other block labels,
+            or blocks that the earlier one doesn't hold.
         """
         sides: tuple[dict[str, list[OutcomeSample]], dict[str, list[OutcomeSample]]]
         sides = ({}, {})
+        cut: dict[str | None, tuple[OutcomeSample, OutcomeSample]] = {}
         for label, group in self.members.items():
             for position, member in enumerate(group):
                 try:
-                    pair = holdout(member, train_fraction=train_fraction, rng=rng)
+                    if member.source in cut:
+                        pair = aligned_sides(member, cut[member.source], rng)
+                        check_no_leakage(*pair)
+                    else:
+                        pair = holdout(member, train_fraction=train_fraction, rng=rng)
+                        cut[member.source] = pair
                 except ParametricError as error:
                     error.add_note(
                         "raised by ScenarioSet.holdout at "
@@ -704,26 +735,23 @@ def _splits(split: object, labels: tuple[str, ...]) -> dict[str, Any]:
 def _check_mixture_leakage(
     design: DesignSample, scenarios: ScenarioSet, label: str
 ) -> None:
-    """Check a mixture's cut members against a design (module docstring).
+    """Check a mixture's members against a design (module docstring).
 
-    Every cut member is checked as ``evaluate`` checks a cut sample; a
-    design on this scenario is also checked against the mixture, whose
-    events and blocks carry their member.
+    Every member is checked as ``evaluate`` checks a sample: by its source
+    token. ``evaluate`` checks the mixture itself, whose events and blocks
+    carry their member.
 
     Raises
     ------
     LeakageError
-        If a member, or the mixture, shares an event or a block with the
-        design sample.
+        If a member of the design sample's source shares an event or a
+        block with it.
     """
     group = scenarios.members[label]
-    cut = [member for member in group if member.split is not None]
-    if len(group) == 1 or not cut:
+    if len(group) == 1:
         return
-    for member in cut:
-        check_no_leakage(design, member)
-    if design.scenario == label:
-        check_no_leakage(design, scenarios.sample(label))
+    for member in group:
+        check_out_of_sample(design, member)
 
 
 def evaluate_scenarios(
@@ -772,8 +800,8 @@ def evaluate_scenarios(
         :func:`~climada_petals.engine.parametric.evaluate.evaluate`.
     LeakageError
         If an out-of-sample evaluation of a design meets a sample, or a
-        member of a mixture, that was cut from another and shares an event
-        or a block with the design sample.
+        member of a mixture, of the design sample's source that shares an
+        event or a block with it (module docstring).
 
     Each error from a scenario has a note naming it.
 

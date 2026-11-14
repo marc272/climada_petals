@@ -191,8 +191,10 @@ class TestBuilders(unittest.TestCase):
 
     def test_invalid_groupings_raise(self) -> None:
         exp = grid_exposures()
-        good = sp.csr_matrix(np.column_stack([np.ones(6), np.zeros(6)]))
-        good[0, 0], good[0, 1] = 0.0, 1.0
+        # Point 0 in unit b, the others in unit a; set before the CSR is built.
+        grouping = np.column_stack([np.ones(6), np.zeros(6)])
+        grouping[0] = [0.0, 1.0]
+        good = sp.csr_matrix(grouping)
         two = good.toarray()
         two[1, 1] = 1.0
         cases: dict[str, tuple[Any, Any, str]] = {

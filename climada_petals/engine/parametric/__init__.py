@@ -58,7 +58,10 @@ from CLIMADA's ``Hazard``, ``TCTracks``, ``Exposures`` and ``Impact``:
 * **Splits:** :func:`holdout` and :func:`year_block_kfold` split a sample by
   blocks: contiguous years on catalogue years, pools of events or of
   ensemble parents on the other routes, with no event or parent on both
-  sides (:func:`check_no_leakage`, :class:`LeakageError`).
+  sides (:func:`check_no_leakage`, :class:`LeakageError`). Every part of a
+  sample, a side or :meth:`~OutcomeSample.unit`, keeps its source token
+  (:attr:`~OutcomeSample.source`), so an out-of-sample evaluation of a
+  design is always checked against the sample it was cut from.
 * **Objectives:** :class:`WeightedCVaR`, the tail objective
   ``alpha CVaR_beta(U) + (1 - alpha) E[U]`` of the uncovered loss ``U``,
   next to :class:`ExpectedUncovered` (``E[U]``) and :class:`MSE`. The first

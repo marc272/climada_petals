@@ -31,8 +31,11 @@ module over the centroids of a unit's points.
 
 from __future__ import annotations
 
+import contextlib
 import datetime as dt
 import unittest
+import warnings
+from collections.abc import Iterator
 from typing import Any, NamedTuple
 
 import geopandas as gpd
@@ -87,6 +90,25 @@ EXHAUSTIONS = np.round(np.arange(3.0, 8.1, 0.2), 6)
 TOLERANCE = 0.05
 
 
+@contextlib.contextmanager
+def cat_bonds_deprecations() -> Iterator[None]:
+    """Ignore the deprecation warnings of ``cat_bonds``' own code, and only those.
+
+    ``cat_bonds`` reads geopandas' ``unary_union`` and runs pandas'
+    ``groupby().apply`` on the grouping column, which both deprecate. The
+    filter is scoped to warnings of that category raised from
+    ``cat_bonds``' modules, so that this test module's run shows the
+    module's own warnings only.
+    """
+    with warnings.catch_warnings():
+        warnings.filterwarnings(
+            "ignore",
+            category=DeprecationWarning,
+            module=r"climada_petals\.engine\.cat_bonds\.",
+        )
+        yield
+
+
 class FloodCase(NamedTuple):
     """The objects of :func:`flood_case`."""
 
@@ -135,7 +157,8 @@ def flood_case(seed: int = 22) -> FloodCase:
         ]
     )
     gdf = gpd.GeoDataFrame(geometry=list(SUBAREAS), crs="EPSG:4326")
-    subareas = Subareas.from_geodataframe(hazard, impfset, exposures, gdf)
+    with cat_bonds_deprecations():
+        subareas = Subareas.from_geodataframe(hazard, impfset, exposures, gdf)
     return FloodCase(exposures, hazard, impfset, subareas)
 
 
@@ -154,10 +177,11 @@ def cobyla(case: FloodCase, initial_guess: tuple[float, float]) -> SubareaCalcul
     principal is far above every loss, so each subarea's ``max_pay`` is its
     largest event loss.
     """
-    calculations = SubareaCalculations(
-        case.subareas, index_stat="mean", initial_guess=initial_guess
-    )
-    calculations.create_pay_vs_dam(attachment_point=0.0, exhaustion_point=1e15)
+    with cat_bonds_deprecations():
+        calculations = SubareaCalculations(
+            case.subareas, index_stat="mean", initial_guess=initial_guess
+        )
+        calculations.create_pay_vs_dam(attachment_point=0.0, exhaustion_point=1e15)
     return calculations
 
 
@@ -187,7 +211,8 @@ def subareas_of(*polygons: Any, values: Any = None) -> Subareas:
     if values is not None:
         exposures.gdf["value"] = values
     gdf = gpd.GeoDataFrame(geometry=list(polygons), crs="EPSG:4326")
-    return Subareas.from_geodataframe(case.hazard, case.impfset, exposures, gdf)
+    with cat_bonds_deprecations():
+        return Subareas.from_geodataframe(case.hazard, case.impfset, exposures, gdf)
 
 
 class TestUnitsFromSubareas(unittest.TestCase):
@@ -209,9 +234,10 @@ class TestUnitsFromSubareas(unittest.TestCase):
 
     def test_subareas_from_a_resolution(self) -> None:
         case = flood_case()
-        subareas = Subareas.from_resolution(
-            case.hazard, case.impfset, case.exposures, 0.2
-        )
+        with cat_bonds_deprecations():
+            subareas = Subareas.from_resolution(
+                case.hazard, case.impfset, case.exposures, 0.2
+            )
         units = InsuredUnits.from_subareas(subareas)
         self.assertEqual(units.n_units, subareas.count_subareas())
         self.assertEqual(units.unit_id, tuple(subareas.subareas_gdf["subarea_letter"]))
@@ -227,7 +253,8 @@ class TestUnitsFromSubareas(unittest.TestCase):
         cells = [box(x - 0.05, y - 0.05, x + 0.05, y + 0.05) for x, y in zip(lon, lat)]
         gdf = gpd.GeoDataFrame(geometry=cells, crs="EPSG:4326")
         # Only the polygons and the exposures are read.
-        subareas = Subareas.from_geodataframe(None, None, exposures, gdf)
+        with cat_bonds_deprecations():
+            subareas = Subareas.from_geodataframe(None, None, exposures, gdf)
         units = InsuredUnits.from_subareas(subareas)
         self.assertEqual(units.unit_id, tuple(chr(65 + k) for k in range(30)))
         self.assertEqual(units.unit_id[26:], ("[", "\\", "]", "^"))

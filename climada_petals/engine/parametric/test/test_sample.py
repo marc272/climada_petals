@@ -16,7 +16,8 @@ with CLIMADA. If not, see <https://www.gnu.org/licenses/>.
 
 ---
 
-Tests of the outcome measures and the risk measures.Tests of the outcome measures, the bases and the risk measures.Tests of the outcome samples, the routes on CLIMADA objects and the splits.
+Tests of the outcome samples, the routes on CLIMADA objects, the splits,
+the samples' source tokens and one unit's sample.
 
 The catalogue tests use a 10,000-year catalogue in the IRIS layout
 (:data:`STORMS`): storms named ``NA_<year>_<number>`` in years 0 to 9,999,
@@ -27,6 +28,7 @@ frequency 1 / 10,000, and dates that carry year ``y`` as 1 January of
 from __future__ import annotations
 
 import copy
+import dataclasses
 import datetime as dt
 import itertools
 import unittest
@@ -63,6 +65,7 @@ from climada_petals.engine.parametric import (
     evaluate,
     holdout,
     labels_from_names,
+    payout_impact,
     sample_years,
     year_block_kfold,
 )
@@ -749,6 +752,141 @@ class TestDrawsAndRandomState(unittest.TestCase):
         self.assertEqual(state[0], after[0])
         np.testing.assert_array_equal(state[1], after[1])
         self.assertEqual(state[2:], after[2:])
+
+
+class TestLineage(unittest.TestCase):
+    """The source token: the fingerprint of a whole sample, kept by its parts."""
+
+    def test_parts_keep_the_token_of_their_source(self) -> None:
+        sample, _ = random_portfolio(3, n_events=30, n_units=2, n_years=40)
+        self.assertRegex(sample.source, "^sha256:[0-9a-f]{64}$")
+        parts = [
+            *holdout(sample),
+            *itertools.chain(*year_block_kfold(sample, 3)),
+            sample.select(sample.years[:10]),
+            sample.unit("U1"),
+        ]
+        for part in parts:
+            self.assertEqual(part.source, sample.source)
+        on_events, _ = random_portfolio(3, n_events=30, n_units=2, basis="event")
+        for part in holdout(on_events, rng=np.random.default_rng(1)):
+            self.assertEqual(part.source, on_events.source)
+        # The label doesn't change it, and a given token is kept.
+        relabelled = dataclasses.replace(sample, scenario="other")
+        self.assertEqual(relabelled.source, sample.source)
+        arrays = (sample.index, sample.loss, sample.frequency, sample.units)
+        given = OutcomeSample(*arrays, sample.basis, source="sha256:given")
+        self.assertEqual(given.source, "sha256:given")
+        for bad in ("", 1):
+            with self.assertRaisesRegex(ParametricInputError, "source must be"):
+                OutcomeSample(*arrays, sample.basis, source=bad)
+
+    def test_the_token_is_that_of_the_event_set(self) -> None:
+        # Event 3 has no loss and an index of 0, so from_impact leaves it out.
+        values, loss = [[30.0], [60.0], [0.0]], [[4.0], [10.0], [0.0]]
+        index, impact, units = array_index(values, loss, frequency=0.1)
+        on_events = OutcomeSample.from_impact(
+            index, impact, units=units, basis=EventBasis()
+        )
+        self.assertEqual(on_events.n_left_out, 1)
+        years = CatalogueYears.from_labels(impact.event_id, [0, 3, 5], n_years=10)
+        on_years = OutcomeSample.from_impact(index, impact, units=units, basis=years)
+        self.assertEqual(on_years.source, on_events.source)
+        # Draws of the same events, one with a loss at event 3, which it keeps;
+        # other frequencies, as a scaled set has; other losses: one token.
+        _, draw, _ = array_index(values, [[5.0], [9.0], [2.0]], frequency=0.1)
+        draws = OutcomeSample.from_impact_draws(
+            index, [impact, draw], units=units, basis=EventBasis()
+        )
+        self.assertEqual((draws.n_draws, draws.n_events), (2, 3))
+        _, scaled, _ = array_index(values, loss, frequency=[0.05, 0.1, 0.3])
+        _, other_loss, _ = array_index(values, [[1.0], [2.0], [0.0]], frequency=0.1)
+        for impact_of_same_events in (scaled, other_loss):
+            self.assertEqual(
+                OutcomeSample.from_impact(
+                    index, impact_of_same_events, units=units, basis=EventBasis()
+                ).source,
+                on_events.source,
+            )
+        self.assertEqual(draws.source, on_events.source)
+        definition = index.definition
+
+        def built(ids: Any, vals: Any) -> str:
+            given = ParametricIndex(vals, ids, units.unit_id, definition)
+            return OutcomeSample(given, loss, [0.1] * 3, units, EventBasis()).source
+
+        # The constructor on the index, also with its events in another order,
+        # gives the same token; other event ids or index values another.
+        self.assertEqual(built([1, 2, 3], values), on_events.source)
+        self.assertEqual(built([3, 1, 2], [[0.0], [30.0], [60.0]]), on_events.source)
+        self.assertNotEqual(built([1, 2, 4], values), on_events.source)
+        self.assertNotEqual(built([1, 2, 3], [[30.0], [60.0], [1.0]]), on_events.source)
+
+
+class TestUnit(unittest.TestCase):
+    """``OutcomeSample.unit``: one unit's column, with every event and record."""
+
+    def setUp(self) -> None:
+        self.sample, _ = random_portfolio(4, n_events=30, n_units=3, n_years=40)
+        self.train, self.test = holdout(self.sample)
+
+    def test_a_unit_keeps_every_event_and_record(self) -> None:
+        with self.assertLogs(LOGGER, "WARNING") as logs:
+            part = self.train.unit("U1")
+        self.assertIn("2 of 3 exposure points are in no insured unit", logs.output[0])
+        train = self.train
+        self.assertEqual(part.unit_id, ("U1",))
+        np.testing.assert_array_equal(part.event_id, train.event_id)
+        np.testing.assert_array_equal(part.index.values[:, 0], train.index.values[:, 1])
+        np.testing.assert_array_equal(
+            part.loss.toarray()[:, 0], train.loss.toarray()[:, 1]
+        )
+        np.testing.assert_array_equal(part.frequency, train.frequency)
+        np.testing.assert_array_equal(part.years, train.years)
+        self.assertIs(part.basis, train.basis)
+        self.assertEqual(
+            (part.split, part.source, part.scenario, part.n_draws, part.n_left_out),
+            (
+                train.split,
+                train.source,
+                train.scenario,
+                train.n_draws,
+                train.n_left_out,
+            ),
+        )
+        np.testing.assert_array_equal(part.measure.weights, train.measure.weights)
+        self.assertEqual((part.measure.grouping != train.measure.grouping).nnz, 0)
+        self.assertEqual(part.units.n_points, 3)
+        np.testing.assert_array_equal(part.units.point_unit, [-1, 0, -1])
+        with self.assertRaisesRegex(ParametricInputError, "no unit 'U9'"):
+            train.unit("U9")
+
+    def test_a_design_on_a_unit(self) -> None:
+        part = self.train.unit("U2")
+        design = calibrate(
+            template(part, PAYOUT),
+            part,
+            ExpectedUncovered(),
+            scope="individual",
+            budget=Budget(ratio=0.5),
+        )
+        table = evaluate(design, self.test.unit("U2"), split="out_of_sample")
+        self.assertEqual(list(table["level"]), ["unit", "total"])
+        with self.assertRaisesRegex(LeakageError, "events are in both samples"):
+            evaluate(design, self.sample.unit("U2"), split="out_of_sample")
+        # Payouts map back to every exposure point: 0 at the other units'.
+        paid = payout_impact(design, self.test.unit("U2")).imp_mat.toarray()
+        self.assertEqual(paid.shape, (self.test.n_events, 3))
+        self.assertEqual(np.abs(paid[:, :2]).sum(), 0.0)
+        self.assertGreater(paid[:, 2].sum(), 0.0)
+
+    def test_a_unit_of_a_sample_with_draws(self) -> None:
+        index, _, units = array_index([[30.0, 5.0], [60.0, 7.0]], np.zeros((2, 2)))
+        loss = [[4.0, 1.0], [10.0, 2.0], [6.0, 3.0], [8.0, 4.0]]
+        sample = OutcomeSample(index, loss, [0.1, 0.1], units, EventBasis(), n_draws=2)
+        part = sample.unit("U1")
+        np.testing.assert_array_equal(part.loss.toarray()[:, 0], [1.0, 2.0, 3.0, 4.0])
+        np.testing.assert_array_equal(part.index_values[:, 0], [5.0, 7.0, 5.0, 7.0])
 
 
 if __name__ == "__main__":
