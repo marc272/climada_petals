@@ -97,9 +97,10 @@ def with_categories(hazard: Hazard) -> TropCyclone:
     ``TropCyclone.apply_climate_scenario_knu`` then returns the set
     unchanged. Here an event's category is the Saffir-Simpson category of
     its largest wind over the set's centroids (-1 for no storm), a lower
-    bound of its track's, and every basin is the North Atlantic, the basin
-    of the storms that reach Jamaica: the others have category -1, which
-    the scaling leaves alone.
+    bound of its track's. Every basin is the North Atlantic, where the
+    storms that reach Jamaica form (their IBTrACS ids say so); the storms of
+    other basins have no wind here, so category -1, which the scaling
+    leaves alone.
     """
     wind = hazard.intensity.max(axis=1).toarray().ravel()
     bounds = np.asarray(SAFFIR_SIM_CAT[:-1], dtype=float) * KN_TO_MS
@@ -208,17 +209,17 @@ class TestScenarioMixture(unittest.TestCase):
         )
         frame = designs_table(designs)
         self.assertEqual(frame["scenario"].tolist(), ["present", RCP45])
+        # Each design on its own scenario's test side. The rcp 4.5 sets hold
+        # the present set's storms with other footprints: other event sets,
+        # cut with their own pools.
         for label, design in designs.items():
             with self.subTest(design=label):
                 self.assertEqual(design.design_sample.scenario, label)
-                table = evaluate_scenarios(design, test, split="out_of_sample")
-                self.assertEqual(
-                    table["scenario"].unique().tolist(), ["present", RCP45]
-                )
-                for scenario in ("present", RCP45):
-                    row = total(table, scenario=scenario)
-                    self.assertAlmostEqual(row["premium"], design.premium)
-                    self.assertEqual(row["n_years"], test.sample(scenario).n_years)
+                own = ScenarioSet({label: list(test.members[label])})
+                row = total(evaluate_scenarios(design, own, split="out_of_sample"))
+                self.assertEqual(row["scenario"], label)
+                self.assertAlmostEqual(row["premium"], design.premium)
+                self.assertEqual(row["n_years"], test.sample(label).n_years)
         # The whole set holds the events the mixture's design was calibrated on.
         with self.assertRaises(LeakageError):
             evaluate_scenarios(designs[RCP45], scenarios, split="out_of_sample")

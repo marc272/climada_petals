@@ -19,13 +19,15 @@ with CLIMADA. If not, see <https://www.gnu.org/licenses/>.
 Integration tests of :mod:`climada_petals.engine.parametric` on hazard sets
 and exposures of CLIMADA's Data API: two hazard types end to end, from the
 ``Hazard``, the ``Exposures`` and ``ImpactCalc`` to ``calibrate``,
-``evaluate`` and ``compare``, and what the unit tests check on synthetic
-objects only.
+``evaluate`` and ``compare``; the index diagnostics on real hazards; and
+insured units from ``cat_bonds``' subareas. The scenarios and the lineage
+of samples are in :mod:`climada_petals.test.test_parametric_scenarios`,
+which uses the data and the helpers of this module.
 
 The data, public datasets of the Data API (CC BY 4.0), read with
 ``climada.util.api_client.Client``, with no credentials. The client keeps
 the files in CLIMADA's data folder, so only the first run downloads them,
-about 210 MB, 164 MB of which are STORM's:
+about 205 MB, 164 MB of which are STORM's:
 
 * tropical cyclones for Jamaica: the ``random_walk`` set of 1980 to 2020
   (:data:`TC_PRESENT`), its rcp 4.5 sets at 2040, 2060 and 2080
