@@ -122,8 +122,10 @@ the event basis the weights are the frequencies, whatever they sum to.
 
 from __future__ import annotations
 
+import dataclasses
 from collections.abc import Hashable, Mapping, Sequence
 from dataclasses import dataclass
+from functools import partial
 from types import MappingProxyType
 from typing import Any, Final, NamedTuple
 
@@ -426,6 +428,15 @@ class CalibrationResult:
                 unit: tuple(names) for unit, names in getattr(self, name).items()
             }
             object.__setattr__(self, name, MappingProxyType(mapping))
+
+    def __reduce__(self) -> tuple[Any, ...]:
+        """Pickle and copy through the constructor, with the mappings as dicts."""
+        fields = {
+            item.name: getattr(self, item.name) for item in dataclasses.fields(self)
+        }
+        fields["calibrated"] = dict(self.calibrated)
+        fields["unidentified"] = dict(self.unidentified)
+        return (partial(CalibrationResult, **fields), ())
 
     @property
     def objective_value(self) -> float:

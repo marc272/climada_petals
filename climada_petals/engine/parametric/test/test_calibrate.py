@@ -24,10 +24,12 @@ The golden cases are read with :mod:`._golden`.
 
 from __future__ import annotations
 
+import copy
 import dataclasses
 import importlib.util
 import itertools
 import math
+import pickle
 import unittest
 from dataclasses import dataclass
 from types import SimpleNamespace
@@ -760,6 +762,18 @@ class TestResult(unittest.TestCase):
         other = ParametricIndex(later.values, [7, 8], ("A", "B"), later.definition)
         with self.assertRaisesRegex(ParametricInputError, "definition and units"):
             result.filled(other)
+
+    def test_a_result_pickles(self) -> None:
+        for copied in (
+            pickle.loads(pickle.dumps(self.result)),
+            copy.deepcopy(self.result),
+        ):
+            self.assertEqual(copied.cover, self.result.cover)
+            self.assertEqual(copied.problems, self.result.problems)
+            self.assertEqual(dict(copied.unidentified), dict(self.result.unidentified))
+            np.testing.assert_array_equal(
+                copied.design_sample.event_id, self.result.design_sample.event_id
+            )
 
     def test_the_scope_is_checked(self) -> None:
         with self.assertRaisesRegex(ParametricInputError, "scope must be one of"):
