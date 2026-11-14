@@ -82,9 +82,9 @@ interface has no QP solver, so it is solved with
 the analytic gradient. Under a cost-of-capital load, the premium is held by
 cutting planes (Kelley, 1960), on the budget constraint alone: each round
 adds the linear piece of the loaded premium at the round's solution, until
-the premium meets the budget within ``feasibility_tolerance``. The route has stated limits (:class:`QPLimits`):
-``max_slsqp_amounts`` amounts, ``max_cut_rounds`` rounds and the
-``time_limit``; reaching one raises
+the premium meets the budget within ``feasibility_tolerance``. The route
+has stated limits (:class:`QPLimits`): ``max_slsqp_amounts`` amounts,
+``max_cut_rounds`` rounds and the ``time_limit``; reaching one raises
 :class:`~climada_petals.engine.parametric.errors.CalibrationLimitError`,
 which names it. The route also reports whether the design's identified
 amounts are unique, from the smallest eigenvalue of the objective's Hessian
