@@ -26,7 +26,6 @@ from __future__ import annotations
 
 import copy
 import dataclasses
-import importlib.util
 import itertools
 import math
 import pickle
@@ -56,7 +55,6 @@ from climada_petals.engine.parametric import (
     Limit,
     LinearInAmounts,
     LinearPayout,
-    MissingDependencyError,
     OutcomeSample,
     ParametricCover,
     ParametricIndex,
@@ -84,7 +82,6 @@ from climada_petals.engine.parametric.test._synthetic import (
 )
 from climada_petals.util.config import LOGGER
 
-HAS_CVXPY = importlib.util.find_spec("cvxpy") is not None
 PAYOUT = StepPayout.uniform(attachment=20.0, exhaustion=70.0, n_steps=4)
 RTOL = 1e-7
 SOLVE_DESIGN = "climada_petals.engine.parametric.calibrate.solve_design"
@@ -166,10 +163,12 @@ class TestGoldenDesigns(unittest.TestCase):
             {unit: set(names) for unit, names in result.unidentified.items()},
             {unit: set(names) for unit, names in expected["unidentified"].items()},
         )
-        self.assertIsNone(result.unique)
-        if case["compare_parameters"] != "exact" or isinstance(objective, MSE):
-            # The mean squared error's interior-point route approaches a level
-            # at its bound only to about the square root of its tolerance.
+        if isinstance(objective, MSE):
+            # The Hessian test; the LP route's ranges come later.
+            self.assertEqual(result.unique, expected["unique"])
+        else:
+            self.assertIsNone(result.unique)
+        if case["compare_parameters"] != "exact":
             return
         # Every amount, the filled ones included: the case fills them as
         # fill="lowest" does.
@@ -196,8 +195,9 @@ class TestGoldenDesigns(unittest.TestCase):
         # Both scopes, both bases, both pricings, and the closed forms.
         self.assertEqual(self._run(("expected_uncovered", "weighted_cvar")), 21)
 
-    @unittest.skipUnless(HAS_CVXPY, "the mean squared error needs cvxpy")
     def test_mean_squared_error(self) -> None:
+        # Both scopes, both bases and both pricings from the core, and three
+        # closed forms, one under a load; parameters and premiums as well.
         self.assertEqual(self._run(("mse",)), 11)
 
 
@@ -531,13 +531,10 @@ class TestScopes(unittest.TestCase):
     def test_the_joint_optimum_is_at_most_the_individual_designs_on_the_total(
         self,
     ) -> None:
-        objectives: list[Any] = [ExpectedUncovered(), WeightedCVaR(alpha=0.9, beta=0.9)]
-        if HAS_CVXPY:
-            objectives.append(MSE())
         cases = itertools.product(
             (0, 1, 2),
             ("annual", "event"),
-            objectives,
+            (ExpectedUncovered(), WeightedCVaR(alpha=0.9, beta=0.9), MSE()),
             (PurePremium(), CostOfCapitalLoad(rate=0.1, q=0.9)),
             (0.3, 1.0),
         )
@@ -860,17 +857,17 @@ class TestInputs(unittest.TestCase):
                 calibrate(cover, self.sample, ExpectedUncovered(), scope="joint")
 
     def test_routes_and_options_this_version_does_not_have_raise(self) -> None:
-        cases = [
-            (ExpectedUncovered(), CalibrationOptions(ranges=True), "ranges=True"),
-            (MSE(), CalibrationOptions(time_limit=1.0), "takes none"),
-        ]
-        for objective, options, match in cases:
+        for objective in (ExpectedUncovered(), MSE()):
             with (
-                self.subTest(match=match),
-                self.assertRaisesRegex(ParametricInputError, match),
+                self.subTest(objective=objective),
+                self.assertRaisesRegex(ParametricInputError, "ranges=True"),
             ):
                 calibrate(
-                    self.cover, self.sample, objective, scope="joint", options=options
+                    self.cover,
+                    self.sample,
+                    objective,
+                    scope="joint",
+                    options=CalibrationOptions(ranges=True),
                 )
 
     def test_invalid_options_raise(self) -> None:
@@ -880,6 +877,8 @@ class TestInputs(unittest.TestCase):
             {"lp_method": "simplex"},
             {"feasibility_tolerance": 0.0},
             {"time_limit": -1.0},
+            {"max_slsqp_amounts": 0},
+            {"max_cut_rounds": 2.5},
         ]
         for fields in bad:
             with self.subTest(fields=fields), self.assertRaises(ParametricInputError):
@@ -925,18 +924,6 @@ class TestInputs(unittest.TestCase):
         with self.assertRaisesRegex(ParametricInputError, "no event"):
             sample.select([5, 6])
 
-    def test_mean_squared_error_without_cvxpy_raises(self) -> None:
-        with mock.patch.dict("sys.modules", {"cvxpy": None}):
-            with self.assertRaisesRegex(MissingDependencyError, "cvxpy"):
-                calibrate(self.cover, self.sample, MSE(), scope="individual")
-            # The linear objectives need no cvxpy.
-            calibrate(
-                self.cover,
-                self.sample,
-                WeightedCVaR(alpha=0.9, beta=0.9),
-                scope="individual",
-            )
-
     def test_a_loss_free_event_below_the_attachment_changes_nothing(self) -> None:
         values = []
         for drop in (False, True):
@@ -950,24 +937,6 @@ class TestInputs(unittest.TestCase):
             )
             values.append((result.objective_value, result.premium))
         np.testing.assert_allclose(values[0], values[1], rtol=1e-9)
-
-
-@unittest.skipUnless(HAS_CVXPY, "the mean squared error needs cvxpy")
-class TestMeanSquaredError(unittest.TestCase):
-    """The mean squared error keeps its cvxpy route in this version."""
-
-    def test_a_design_pays_nothing_below_the_attachment(self) -> None:
-        sample = _hand_example()
-        result = calibrate(
-            template(sample, StepPayout.uniform(20.0, 70.0, 2)),
-            sample,
-            MSE(),
-            scope="individual",
-            budget=Budget(ratio=5.0),
-        )
-        np.testing.assert_allclose(_levels(result), [4.0, 10.0], atol=1e-3)
-        self.assertAlmostEqual(result.objective_value, 0.0, 6)
-        self.assertEqual(result.problems[0].solver.route, "qp")
 
 
 if __name__ == "__main__":

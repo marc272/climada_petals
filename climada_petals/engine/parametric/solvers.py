@@ -76,18 +76,26 @@ a time or iteration limit
 or anything else (:class:`~climada_petals.engine.parametric.errors.CalibrationError`).
 
 The mean squared error is a QP, ``sum_o w_o (L_o - P_o)^2`` under the same
-constraints. scipy's public interface has no QP solver, so this version
-solves it with cvxpy and its bundled Clarabel solver, an optional
-dependency imported only then.
+constraints on the amounts, with no auxiliary variables. scipy's public
+interface has no QP solver, so it is solved with
+:func:`scipy.optimize.minimize` and ``method="SLSQP"`` on the amounts, with
+the analytic gradient. Under a cost-of-capital load, the premium is held by
+cutting planes: each round adds the linear piece of the loaded premium at
+the round's solution, until the premium meets the budget within
+``feasibility_tolerance``. The route has stated limits (:class:`QPLimits`):
+``max_slsqp_amounts`` amounts, ``max_cut_rounds`` rounds and the
+``time_limit``; reaching one raises
+:class:`~climada_petals.engine.parametric.errors.CalibrationLimitError`,
+which names it. The route also reports whether the design's identified
+amounts are unique, from the smallest eigenvalue of the objective's Hessian
+restricted to them (``Solution.unique``).
 """
 
 from __future__ import annotations
 
-import importlib
 import time
 from collections.abc import Sequence
 from dataclasses import dataclass, field
-from functools import cached_property
 from typing import Any, Final
 
 import numpy as np
@@ -98,35 +106,41 @@ from scipy.optimize import linprog
 
 from climada_petals.util.config import LOGGER
 
+from ._problem import (
+    MIN_SCALE_LOSS,
+    DesignProblem,
+    Scaled,
+    Solution,
+    SolverInfo,
+    objective_norm,
+)
+from ._qp import SLSQP_OPTIONS, UNIQUE_RTOL, QPLimits, solve_mse
 from .constraints import violation
 from .errors import (
     CalibrationError,
     CalibrationLimitError,
     InfeasibleCalibrationError,
-    MissingDependencyError,
     UnboundedCalibrationError,
 )
-from .measure import OutcomeMeasure
 from .objectives import MSE, Objective, WeightedCVaR
-from .parameters import AmountConstraints
 from .pricing import CostOfCapitalLoad, Pricing
 
 __all__ = [
-    "CLARABEL_OPTIONS",
     "HIGHS_OPTIONS",
     "LP_METHODS",
     "MIN_SCALE_LOSS",
+    "SLSQP_OPTIONS",
+    "UNIQUE_RTOL",
     "DesignProblem",
+    "QPLimits",
     "Solution",
     "SolverInfo",
     "check_amounts",
+    "check_limit",
     "lp_method",
     "solve_design",
     "verify_solution",
 ]
-
-MIN_SCALE_LOSS: Final[float] = 1e-6
-"""The problem is scaled by its largest loss in one row only above this value."""
 
 LP_METHODS: Final[tuple[str, ...]] = ("auto", "highs", "highs-ipm")
 """The values of ``CalibrationOptions.lp_method`` (:func:`lp_method`)."""
@@ -137,20 +151,6 @@ HIGHS_OPTIONS: Final[dict[str, Any]] = {
     "dual_feasibility_tolerance": 1e-9,
 }
 """Options passed to :func:`scipy.optimize.linprog` with either HiGHS method."""
-
-_QP_SOLVER: Final[str] = "CLARABEL"
-"""cvxpy solver of the mean squared error; installed with cvxpy itself."""
-
-CLARABEL_OPTIONS: Final[dict[str, float]] = {
-    "tol_gap_abs": 1e-10,
-    "tol_gap_rel": 1e-10,
-    "tol_feas": 1e-10,
-}
-"""Clarabel tolerances of the mean squared error (its defaults are ``1e-8``).
-
-The objective is flat at its optimum, so the defaults leave optimal values
-up to about ``1e-6`` relative above the optimum on a 10,000-year hazard set;
-these tolerances bring them to about ``1e-8``."""
 
 _LIMIT_STATUS: Final[int] = 1
 _INFEASIBLE_STATUS: Final[int] = 2
@@ -176,115 +176,6 @@ def lp_method(option: str, n_units: int) -> str:
     if option != "auto":
         return option
     return "highs" if n_units == 1 else "highs-ipm"
-
-
-@dataclass(frozen=True)
-class SolverInfo:
-    """How a design problem was solved.
-
-    Attributes
-    ----------
-    route : {"lp", "qp"}
-        One linear program, or one quadratic program.
-    solver : str
-        ``"scipy-highs"`` or ``"cvxpy-CLARABEL"``.
-    version : str
-        The version of scipy or cvxpy.
-    method : str or None
-        The ``linprog`` method, ``"highs"`` or ``"highs-ipm"``; None for the
-        quadratic program.
-    status : str
-        The solver's status; always a success in a returned solution.
-    message : str
-        The solver's message.
-    iterations : int or None
-        Iterations, where the solver reports them.
-    seconds : float
-        Wall time of the assembly and the solve.
-    """
-
-    route: str
-    solver: str
-    version: str
-    method: str | None
-    status: str
-    message: str
-    iterations: int | None
-    seconds: float
-
-
-@dataclass(frozen=True, eq=False)
-class DesignProblem:
-    """The data of one design problem, in loss units.
-
-    Attributes
-    ----------
-    problem_id : str
-        A unit id (individual scope) or ``"joint"``.
-    basis : scipy.sparse.csr_matrix
-        ``B``, shape ``(n_rows, n_amounts)``: the units' bases side by side,
-        so the problem's payout of row ``r`` is ``B[r] @ amounts``.
-    loss : numpy.ndarray
-        The problem's loss per row, summed over its units, >= 0.
-    constraints : sequence of AmountConstraints
-        One per unit, in the order of the amounts.
-    measure : OutcomeMeasure
-        The outcomes of the rows and their weights.
-    bound : float or None
-        The largest premium, or None without a budget.
-    """
-
-    problem_id: str
-    basis: sp.csr_matrix
-    loss: NDArray[np.float64]
-    constraints: Sequence[AmountConstraints]
-    measure: OutcomeMeasure
-    bound: float | None = field(default=None)
-
-    @property
-    def scale(self) -> float:
-        """Loss scale: the largest loss in one row, or 1 if it is tiny."""
-        largest = float(self.loss.max(initial=0.0))
-        return largest if largest > MIN_SCALE_LOSS else 1.0
-
-    @cached_property
-    def lower(self) -> NDArray[np.float64]:
-        """Lower bounds of the amounts, side by side."""
-        return np.concatenate([part.lower for part in self.constraints])
-
-    @cached_property
-    def upper(self) -> NDArray[np.float64]:
-        """Upper bounds of the amounts, side by side; ``inf`` where none."""
-        return np.concatenate([part.upper for part in self.constraints])
-
-    @cached_property
-    def rows(self) -> tuple[sp.csr_matrix, NDArray[np.float64]]:
-        """The units' rows ``a_ub @ amounts <= b_ub``, block-diagonal and sparse."""
-        a_ub = sp.block_diag(
-            [sp.csr_matrix(part.a_ub) for part in self.constraints], format="csr"
-        )
-        b_ub = np.concatenate([part.b_ub for part in self.constraints])
-        return sp.csr_matrix(a_ub, shape=(b_ub.size, self.lower.size)), b_ub
-
-
-@dataclass(frozen=True, eq=False)
-class Solution:
-    """The solution of one design problem, in loss units.
-
-    Attributes
-    ----------
-    amounts : numpy.ndarray
-        The amounts as the solver returned them, shape ``(n_amounts,)``,
-        before they are snapped to their bounds.
-    objective_value : float
-        The solver's optimal objective value.
-    info : SolverInfo
-        Route, solver, method, status and timing.
-    """
-
-    amounts: NDArray[np.float64]
-    objective_value: float
-    info: SolverInfo
 
 
 @dataclass
@@ -365,70 +256,8 @@ class _LinearProgram:
         return level, excess
 
 
-@dataclass(frozen=True, eq=False)
-class _Scaled:
-    """The scaled arrays every formulation needs."""
-
-    loss: NDArray[np.float64]  # (n,) problem loss / scale
-    basis: sp.csr_matrix  # (n, amounts)
-    lower: NDArray[np.float64]  # (amounts,) / scale
-    upper: NDArray[np.float64]  # (amounts,) / scale
-    rows: sp.csr_matrix  # (r, amounts)
-    rhs: NDArray[np.float64]  # (r,) / scale
-    event_weight: NDArray[np.float64]  # (n,)
-    group: sp.csr_matrix  # (O, n)
-    weights: NDArray[np.float64]  # (O,)
-
-    @property
-    def expected_loss(self) -> float:
-        """``E[L]`` in scaled units."""
-        return float(self.event_weight @ self.loss)
-
-    @property
-    def premium_row(self) -> NDArray[np.float64]:
-        """``E[P] = premium_row @ theta``, shape ``(n_amounts,)``."""
-        return np.asarray(self.basis.T @ self.event_weight, dtype=np.float64)
-
-    @property
-    def budget_unit(self) -> float:
-        """Divisor of the budget row: ``E[L]``, or 1 if it is 0."""
-        expected = self.expected_loss
-        return expected if expected > 0.0 else 1.0
-
-
-def _scaled(problem: DesignProblem) -> _Scaled:
-    """Scale the problem data."""
-    scale = problem.scale
-    rows, rhs = problem.rows
-    return _Scaled(
-        loss=problem.loss / scale,
-        basis=sp.csr_matrix(problem.basis),
-        lower=problem.lower / scale,
-        upper=problem.upper / scale,
-        rows=rows,
-        rhs=rhs / scale,
-        event_weight=np.asarray(problem.measure.event_weight, dtype=np.float64),
-        group=problem.measure.grouping,
-        weights=np.asarray(problem.measure.weights, dtype=np.float64),
-    )
-
-
-def _objective_norm(
-    objective: Objective, arr: _Scaled, measure: OutcomeMeasure
-) -> float:
-    """Return the objective of the zero cover in scaled units, or 1 if it is 0.
-
-    The solver minimises the objective divided by this value, which is then
-    at most 1 at the optimum, whatever the weights: with 10,000 simulation
-    years an outcome has weight ``1e-4``, and an unnormalised objective
-    would be close to the solvers' tolerances.
-    """
-    value = objective.evaluate(arr.loss, np.zeros_like(arr.loss), measure)
-    return value if value > 0.0 else 1.0
-
-
 def _add_budget(
-    program: _LinearProgram, arr: _Scaled, theta: int, pricing: Pricing, bound: float
+    program: _LinearProgram, arr: Scaled, theta: int, pricing: Pricing, bound: float
 ) -> None:
     """Add ``premium / E[L] <= bound / E[L]`` (module docstring); ``bound`` scaled."""
     unit = arr.budget_unit
@@ -453,7 +282,7 @@ def _add_budget(
 
 
 def _add_shortfall(
-    program: _LinearProgram, arr: _Scaled, theta: int, lossy: NDArray[np.bool_]
+    program: _LinearProgram, arr: Scaled, theta: int, lossy: NDArray[np.bool_]
 ) -> int:
     """Add the shortfall ``u`` of the rows with loss and its rows; return its id."""
     n_lossy = int(lossy.sum())
@@ -468,7 +297,7 @@ def _add_shortfall(
 
 def _set_cost(
     program: _LinearProgram,
-    arr: _Scaled,
+    arr: Scaled,
     objective: Objective,
     *,
     short: int,
@@ -512,8 +341,8 @@ def _assemble(
     problem: DesignProblem, objective: Objective, pricing: Pricing
 ) -> tuple[_LinearProgram, int, float]:
     """Return the LP of the module docstring, the id of ``theta`` and the norm."""
-    arr = _scaled(problem)
-    norm = _objective_norm(objective, arr, problem.measure)
+    arr = problem.scaled()
+    norm = objective_norm(objective, arr, problem.measure)
     program = _LinearProgram()
     theta = program.add(arr.lower.size, lower=arr.lower, upper=arr.upper)
     lossy = arr.loss > 0.0
@@ -569,119 +398,6 @@ def _solve_lp(
     )
 
 
-def _import_cvxpy() -> Any:
-    """Import cvxpy, or explain how to get by without it.
-
-    Raises
-    ------
-    MissingDependencyError
-        If cvxpy is not installed.
-    """
-    try:
-        return importlib.import_module("cvxpy")
-    except ImportError as exc:
-        raise MissingDependencyError(
-            "the mean squared error objective is a quadratic program, which this "
-            "version solves with the optional dependency cvxpy, not installed. "
-            "Install cvxpy, or use ExpectedUncovered or WeightedCVaR, which are "
-            "linear programs solved by scipy's HiGHS"
-        ) from exc
-
-
-def _qp_budget(
-    cvx: Any,
-    arr: _Scaled,
-    theta: Any,
-    outcome_payout: Any,
-    pricing: Pricing,
-    *,
-    bound: float,
-) -> list[Any]:
-    """Return the QP's budget constraints, ``premium / E[L] <= bound / E[L]`` (cvxpy)."""
-    expected_payout = arr.premium_row @ theta
-    extra: list[Any] = []
-    if isinstance(pricing, CostOfCapitalLoad) and pricing.rate > 0.0:
-        eta = cvx.Variable()
-        extra.append(eta >= 0)
-        tail = eta + arr.weights @ cvx.pos(outcome_payout - eta) / (1.0 - pricing.q)
-        premium = (1.0 - pricing.rate) * expected_payout + pricing.rate * tail
-    else:
-        premium = expected_payout
-    unit = arr.budget_unit
-    return [premium / unit <= bound / unit, *extra]
-
-
-def _run_qp(cvx: Any, problem: Any, problem_id: str, start: float) -> SolverInfo:
-    """Solve a cvxpy problem with Clarabel; return the solver info.
-
-    Raises
-    ------
-    CalibrationError
-        If cvxpy raises a solver error.
-    """
-    try:
-        problem.solve(solver=_QP_SOLVER, **CLARABEL_OPTIONS)
-    except cvx.SolverError as exc:
-        raise CalibrationError(
-            f"cvxpy's {_QP_SOLVER} failed: {exc}", problem_id=problem_id
-        ) from exc
-    stats = problem.solver_stats
-    iterations = None if stats is None else stats.num_iters
-    return SolverInfo(
-        route="qp",
-        solver=f"cvxpy-{_QP_SOLVER}",
-        version=str(getattr(cvx, "__version__", "")),
-        method=None,
-        status=str(problem.status),
-        message=str(problem.status),
-        iterations=None if iterations is None else int(iterations),
-        seconds=time.perf_counter() - start,
-    )
-
-
-def _solve_qp(problem: DesignProblem, pricing: Pricing) -> Solution:
-    """Solve the mean squared error design with cvxpy and Clarabel."""
-    cvx = _import_cvxpy()
-    start = time.perf_counter()
-    arr = _scaled(problem)
-    norm = _objective_norm(MSE(), arr, problem.measure)
-    theta = cvx.Variable(arr.lower.size)
-    outcome_payout = arr.group @ (arr.basis @ theta)
-    residual = arr.group @ arr.loss - outcome_payout
-    bounded = np.isfinite(arr.upper)
-    constraints = [theta >= arr.lower]
-    if bounded.any():
-        constraints.append(theta[bounded] <= arr.upper[bounded])
-    if arr.rhs.size:
-        constraints.append(arr.rows @ theta <= arr.rhs)
-    if problem.bound is not None:
-        constraints += _qp_budget(
-            cvx,
-            arr,
-            theta,
-            outcome_payout,
-            pricing,
-            bound=problem.bound / problem.scale,
-        )
-    program = cvx.Problem(
-        cvx.Minimize((arr.weights / norm) @ cvx.square(residual)), constraints
-    )
-    info = _run_qp(cvx, program, problem.problem_id, start)
-    if program.status != "optimal" or theta.value is None:
-        raise CalibrationError(
-            f"cvxpy's {_QP_SOLVER} found no optimal solution: {program.status}",
-            problem_id=problem.problem_id,
-            status=str(program.status),
-            solver_message=str(program.status),
-        )
-    amounts = np.asarray(theta.value, dtype=np.float64)
-    return Solution(
-        amounts * problem.scale,
-        float(program.value) * norm * problem.scale**2,
-        info,
-    )
-
-
 def check_amounts(
     problem: DesignProblem, amounts: NDArray[np.float64], tolerance: float
 ) -> None:
@@ -711,6 +427,40 @@ def check_amounts(
             raise CalibrationError(
                 f"the solver's amounts break their bounds or rows by {gap:.3g}, "
                 f"above the tolerance {tolerance:g} x {problem.scale:.6g}",
+                problem_id=problem.problem_id,
+            )
+
+
+def check_limit(
+    problem: DesignProblem,
+    paid: NDArray[np.float64],
+    caps: Sequence[float | None],
+    tolerance: float,
+) -> None:
+    """Raise if a unit's payout is above its limit, beyond the tolerance.
+
+    Parameters
+    ----------
+    problem : DesignProblem
+        The problem solved.
+    paid : numpy.ndarray
+        The resolved cover's payout per row and unit of the problem,
+        ``(n_rows, n_units)``.
+    caps : sequence of float or None
+        Each unit's limit, or None.
+    tolerance : float
+        Relative to the larger of the limit and the largest loss in one row.
+
+    Raises
+    ------
+    CalibrationError
+        If a payout is above its unit's limit beyond the tolerance.
+    """
+    for column, cap in enumerate(caps):
+        largest = float(paid[:, column].max(initial=0.0))
+        if cap is not None and largest > cap + tolerance * max(cap, problem.scale):
+            raise CalibrationError(
+                f"a payout of {largest:.12g} is above its limit {cap:.12g}",
                 problem_id=problem.problem_id,
             )
 
@@ -787,6 +537,7 @@ def solve_design(
     *,
     method: str,
     time_limit: float | None = None,
+    limits: QPLimits = QPLimits(),  # a tuple, so safe to share
 ) -> Solution:
     """Solve one design problem (module docstring).
 
@@ -801,27 +552,29 @@ def solve_design(
     method : {"highs", "highs-ipm"}
         The ``linprog`` method of a linear program (:func:`lp_method`).
     time_limit : float, optional
-        Seconds HiGHS may take; a linear program only.
+        Seconds HiGHS may take on a linear program, or the mean squared
+        error's route on the whole problem.
+    limits : QPLimits, default QPLimits()
+        The stated limits of the mean squared error's route.
 
     Returns
     -------
     Solution
-        The amounts and the objective value in loss units, and the solver
-        info.
+        The amounts and the objective value in loss units, the solver info,
+        and for the mean squared error whether the design is unique.
 
     Raises
     ------
     InfeasibleCalibrationError, UnboundedCalibrationError
-        If HiGHS finds the problem infeasible or unbounded.
+        If the solver finds the problem infeasible or unbounded.
     CalibrationLimitError
-        If HiGHS reaches ``time_limit`` or its iteration limit.
+        If ``time_limit``, the solver's iteration limit, or a limit of
+        ``limits`` is reached.
     CalibrationError
         If the solver finds no optimal solution for another reason.
-    MissingDependencyError
-        If the objective is the mean squared error and cvxpy is missing.
     """
     if isinstance(objective, MSE):
-        solution = _solve_qp(problem, pricing)
+        solution = solve_mse(problem, pricing, time_limit=time_limit, limits=limits)
     else:
         solution = _solve_lp(
             problem, objective, pricing, method=method, time_limit=time_limit

@@ -67,7 +67,10 @@ built-in families) with every shape parameter, such as a breakpoint, fixed:
 * ``ExpectedUncovered`` and ``WeightedCVaR``: one linear program per design
   problem, with scipy's HiGHS
   (:mod:`~climada_petals.engine.parametric.solvers`);
-* ``MSE``: one quadratic program, with the optional dependency cvxpy.
+* ``MSE``: one quadratic program per design problem, with scipy's
+  ``SLSQP``, and cutting planes under a cost-of-capital load
+  (:mod:`~climada_petals.engine.parametric.solvers`). It has stated limits:
+  ``CalibrationOptions.max_slsqp_amounts`` and ``max_cut_rounds``.
 
 A free shape parameter, a payout that is not linear in its amounts, and
 ``CalibrationOptions(ranges=True)`` take routes this version doesn't have,
@@ -104,9 +107,12 @@ Non-uniqueness and degenerate tails
   values the constraints allow, which under monotone levels is the previous
   level, or ``"highest"`` the largest. The evaluation reports how much of a
   sample lands on them (``unidentified_share``).
-* ``unique`` and ``ties`` are None in this version: the ranges of the LP
-  route, the uniqueness test of the mean squared error and the grid route
-  come later.
+* **Uniqueness.** On the mean squared error's route, ``unique`` says
+  whether every design problem's identified amounts are unique: the
+  objective's Hessian restricted to them is positive definite (smallest
+  eigenvalue above ``1e-10`` times the largest). On the LP route it is None
+  in this version, as ``ties`` is: the ranges and the grid route come
+  later.
 * **Degenerate tails** of the weighted CVaR are recorded per design
   problem, not raised: ``"expected_uncovered"`` when the tail holds every
   outcome with a loss (``1 - beta`` at least their weight), so the design
@@ -136,7 +142,7 @@ from numpy.typing import NDArray
 
 from climada_petals.util.config import LOGGER
 
-from ._checks import check_real
+from ._checks import check_int, check_real
 from .constraints import (
     FILLS,
     Budget,
@@ -149,7 +155,7 @@ from .constraints import (
     unit_amounts,
 )
 from .cover import ParametricCover
-from .errors import CalibrationError, ParametricInputError
+from .errors import ParametricInputError
 from .index import ParametricIndex
 from .objectives import MSE, ExpectedUncovered, Objective, WeightedCVaR, tail_degeneracy
 from .payout import LinearInAmounts
@@ -158,9 +164,11 @@ from .sample import OutcomeSample, SplitRecord
 from .solvers import (
     LP_METHODS,
     DesignProblem,
+    QPLimits,
     Solution,
     SolverInfo,
     check_amounts,
+    check_limit,
     lp_method,
     solve_design,
     verify_solution,
@@ -206,9 +214,17 @@ class CalibrationOptions:
         The relative tolerance of the checks after the solve (module
         docstring), > 0.
     time_limit : float, optional
-        Seconds each linear program may take; reaching it raises
+        Seconds each linear program, or each mean squared error's design
+        problem with all its rounds, may take; reaching it raises
         :class:`~climada_petals.engine.parametric.errors.CalibrationLimitError`.
         Default: no limit.
+    max_slsqp_amounts : int, default 1_000
+        The most amounts the mean squared error's ``SLSQP`` route solves for
+        in one design problem, >= 1. Above it, ``CalibrationLimitError``.
+    max_cut_rounds : int, default 100
+        The most ``SLSQP`` solves of the mean squared error under a
+        cost-of-capital load, each adding a cutting plane, >= 1. Reaching it
+        with the premium above the budget raises ``CalibrationLimitError``.
 
     Raises
     ------
@@ -221,9 +237,13 @@ class CalibrationOptions:
     lp_method: str = "auto"
     feasibility_tolerance: float = 1e-7
     time_limit: float | None = None
+    max_slsqp_amounts: int = 1_000
+    max_cut_rounds: int = 100
 
     def __post_init__(self) -> None:
         """Validate the options."""
+        for name in ("max_slsqp_amounts", "max_cut_rounds"):
+            object.__setattr__(self, name, check_int(name, getattr(self, name), low=1))
         if self.fill not in FILLS:
             raise ParametricInputError(
                 f"fill must be one of {list(FILLS)}, got {self.fill!r}"
@@ -279,6 +299,9 @@ class CoverProblem:
         The weighted CVaR's degenerate tail (module docstring), else None.
     solver : SolverInfo
         Route, solver, version, method, status and time.
+    unique : bool or None, default None
+        Whether the problem's identified amounts are unique (module
+        docstring); None where the route doesn't determine it.
     """
 
     problem_id: str
@@ -290,6 +313,7 @@ class CoverProblem:
     loss_weight: float
     degenerate_tail: str | None
     solver: SolverInfo
+    unique: bool | None = None
 
     @property
     def budget_use(self) -> float | None:
@@ -396,8 +420,8 @@ class CalibrationResult:
     design_sample : DesignSample
         The basis, route, size, events and blocks of the design sample.
     unique : bool or None, default None
-        Whether every design problem's identified amounts are unique. None:
-        not determined in this version.
+        Whether every design problem's identified amounts are unique; None
+        if a route doesn't determine it (the LP route in this version).
     ties : int or None, default None
         Grid candidates tied with the best. None: no grid.
     """
@@ -526,9 +550,9 @@ class CalibrationResult:
             Columns ``problem_id``, ``scope``, ``objective`` (the document as
             text), ``objective_value``, ``premium``, ``expected_loss``,
             ``budget_bound``, ``budget_use``, ``loss_weight``,
-            ``degenerate_tail``, ``n_unidentified``, ``route``, ``solver``,
-            ``version``, ``method``, ``status``, ``iterations`` and
-            ``seconds``.
+            ``degenerate_tail``, ``n_unidentified``, ``unique``, ``route``,
+            ``solver``, ``version``, ``method``, ``status``, ``iterations``,
+            ``rounds`` and ``seconds``.
         """
         rows = []
         for problem in self.problems:
@@ -547,12 +571,14 @@ class CalibrationResult:
                     "n_unidentified": sum(
                         len(self.unidentified.get(unit, ())) for unit in problem.unit_id
                     ),
+                    "unique": problem.unique,
                     "route": problem.solver.route,
                     "solver": problem.solver.solver,
                     "version": problem.solver.version,
                     "method": problem.solver.method,
                     "status": problem.solver.status,
                     "iterations": problem.solver.iterations,
+                    "rounds": problem.solver.rounds,
                     "seconds": problem.solver.seconds,
                 }
             )
@@ -691,11 +717,6 @@ def _check_arguments(arguments: _Setup) -> None:
             "ranges=True ranges each amount over the optimal set, which this "
             "version doesn't do yet"
         )
-    if isinstance(arguments.objective, MSE) and options.time_limit is not None:
-        raise ParametricInputError(
-            "time_limit applies to the linear programs; the mean squared error's "
-            "route in this version takes none"
-        )
 
 
 def _problems(scope: str, units: Sequence[UnitAmounts]) -> list[tuple[str, list[int]]]:
@@ -774,27 +795,16 @@ def _solve(
             setup.pricing,
             method=lp_method(setup.options.lp_method, len(members)),
             time_limit=setup.options.time_limit,
+            limits=QPLimits(
+                setup.options.max_slsqp_amounts,
+                setup.options.max_cut_rounds,
+                setup.options.feasibility_tolerance,
+            ),
         )
         check_amounts(problem, solution.amounts, setup.options.feasibility_tolerance)
         amounts.update(final_amounts(members, solution.amounts, setup.options.fill))
         solved.append(_Solved(problem, positions, solution))
     return solved, amounts
-
-
-def _check_limit(
-    problem: DesignProblem,
-    paid: NDArray[np.float64],
-    caps: list[float | None],
-    tolerance: float,
-) -> None:
-    """Raise if a unit's payout is above its limit, beyond the tolerance."""
-    for column, cap in enumerate(caps):
-        largest = float(paid[:, column].max(initial=0.0))
-        if cap is not None and largest > cap + tolerance * max(cap, problem.scale):
-            raise CalibrationError(
-                f"a payout of {largest:.12g} is above its limit {cap:.12g}",
-                problem_id=problem.problem_id,
-            )
 
 
 def _record(
@@ -811,7 +821,7 @@ def _record(
     unit_id = tuple(cover.unit_id[p] for p in positions)
     caps = [None if cover.limit is None else cover.limit.amount_of(u) for u in unit_id]
     tolerance = setup.options.feasibility_tolerance
-    _check_limit(problem, paid[:, positions], caps, tolerance)
+    check_limit(problem, paid[:, positions], caps, tolerance)
     value, premium = verify_solution(
         problem,
         paid[:, positions],
@@ -831,6 +841,7 @@ def _record(
         loss_weight=weight,
         degenerate_tail=degenerate,
         solver=solution.info,
+        unique=solution.unique,
     )
     _log(record, setup.objective)
     return record
@@ -847,6 +858,8 @@ def _design(setup: _Setup) -> CalibrationResult:
     solved, amounts = _solve(setup, units)
     cover = resolved_cover(setup.template, units, amounts, limit)
     paid = cover.payout_matrix(sample.index)[sample.event_row]
+    problems = tuple(_record(setup, item, paid, cover) for item in solved)
+    flags = [problem.unique for problem in problems]
     return CalibrationResult(
         cover=cover,
         template_hash=setup.template.definition_hash,
@@ -854,7 +867,7 @@ def _design(setup: _Setup) -> CalibrationResult:
         pricing=setup.pricing,
         budget=setup.budget,
         scope=setup.scope,
-        problems=tuple(_record(setup, item, paid, cover) for item in solved),
+        problems=problems,
         calibrated={
             unit.unit_id: setup.template.payout[unit.unit_id].free_parameters()
             for unit in units
@@ -862,6 +875,7 @@ def _design(setup: _Setup) -> CalibrationResult:
         unidentified={unit.unit_id: unit.unidentified_names for unit in units},
         fill=setup.options.fill,
         design_sample=DesignSample.from_sample(sample),
+        unique=None if None in flags else all(flags),
     )
 
 
@@ -889,7 +903,7 @@ def calibrate(
         e.g. the training side of
         :func:`~climada_petals.engine.parametric.sample.holdout`.
     objective : MSE, ExpectedUncovered or WeightedCVaR
-        What the design minimises. ``MSE()`` needs cvxpy in this version.
+        What the design minimises.
     scope : {"individual", "joint"}
         One design problem per unit, or one on the owner's total. Required.
     pricing : PurePremium or CostOfCapitalLoad, default PurePremium()
@@ -920,9 +934,8 @@ def calibrate(
         If a design problem is not solved to optimality, or its solution
         fails a check: :class:`InfeasibleCalibrationError`,
         :class:`UnboundedCalibrationError`, :class:`CalibrationLimitError`
-        (``time_limit``) or the base class. No problem is skipped.
-    MissingDependencyError
-        If the objective is the mean squared error and cvxpy is missing.
+        (``time_limit``, ``max_slsqp_amounts``, ``max_cut_rounds`` or a
+        solver's iteration limit) or the base class. No problem is skipped.
 
     Examples
     --------
