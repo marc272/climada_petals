@@ -74,6 +74,7 @@ from .errors import ParametricInputError
 from .index import ParametricIndex
 from .measure import BASES, OutcomeMeasure, outcome_measure
 from .objectives import ExpectedUncovered, MeanSquaredError, Objective, WeightedCVaR
+from .parameters import Free
 from .payout import StepPayout
 from .pricing import CostOfCapitalLoad, Pricing, PurePremium
 from .solvers import DesignData, SolverInfo, solve_design
@@ -81,8 +82,8 @@ from .solvers import DesignData, SolverInfo, solve_design
 __all__ = [
     "PORTFOLIO",
     "SCOPES",
+    "CalibrationResult",
     "CoverProblem",
-    "ParametricCover",
     "Scope",
     "calibrate",
     "loss_matrix",
@@ -142,13 +143,14 @@ class CoverProblem:
 
 
 @dataclass(frozen=True, eq=False)
-class ParametricCover:
-    """A calibrated cover: the payout levels of every unit and how they were found.
+class CalibrationResult:
+    """A calibration's result: the payout levels of every unit and how they were found.
 
     Attributes
     ----------
     payout : StepPayout
-        The payout structure of every unit.
+        The step payout template of every unit: its breakpoints. The levels
+        are in ``levels``.
     objective : Objective
         The objective the levels minimise.
     pricing : Pricing
@@ -236,7 +238,7 @@ class ParametricCover:
                 "the index's units are not the cover's: "
                 f"{list(index.unit_id)[:5]} vs {list(self.unit_id)[:5]}"
             )
-        return self.payout.evaluate(index.values, self.levels)
+        return _paid(self.payout, index.values, self.levels)
 
     def payout_impact(self, index: ParametricIndex, impact: Any) -> Any:
         """Return the payouts as a CLIMADA ``Impact``, aligned with ``impact``.
@@ -292,10 +294,11 @@ class ParametricCover:
         -------
         pandas.DataFrame
             One row per unit and step: ``unit_id``, ``step``, ``lower`` and
-            ``upper`` (the step's index range, ``[lower, upper)``) and
-            ``level`` (the payout, loss units).
+            ``upper`` (the step's index range, ``[lower, upper)``; ``inf``
+            for the last step, which has no upper edge) and ``level`` (the
+            payout, loss units).
         """
-        edges = self.payout.edges
+        edges = np.append(np.asarray(self.payout.breakpoints, dtype=float), np.inf)
         n_steps = self.payout.n_steps
         return pd.DataFrame(
             {
@@ -454,6 +457,17 @@ def _check_arguments(
         raise ParametricInputError(f"index must be a ParametricIndex, got {index!r}")
     if not isinstance(payout, StepPayout):
         raise ParametricInputError(f"payout must be a StepPayout, got {payout!r}")
+    if (
+        payout.tail != "upper"
+        or not payout.monotone
+        or any(isinstance(edge, Free) for edge in payout.breakpoints)
+        or any(level != Free() for level in payout.levels)
+    ):
+        raise ParametricInputError(
+            "calibrate takes a StepPayout with fixed breakpoints, tail='upper', "
+            "monotone=True and every level Free(), such as "
+            f"StepPayout.uniform(attachment, exhaustion, n_steps); got {payout!r}"
+        )
     checked_objective = _check_objective(objective)
     checked_pricing = _check_pricing(pricing)
     if basis not in BASES:
@@ -534,7 +548,7 @@ def _cover_problem(
     solution = solve_design(
         data, design.payout, design.objective, design.pricing, design.budget
     )
-    paid = design.payout.evaluate(data.index, solution.levels).sum(axis=1)
+    paid = _paid(design.payout, data.index, solution.levels).sum(axis=1)
     expected_loss = design.measure.expectation(data.total_loss)
     diagnostics = _diagnostics(design.objective, data.total_loss, design.measure)
     problem = CoverProblem(
@@ -586,7 +600,7 @@ def calibrate(  # pylint: disable=too-many-arguments
     pricing: Pricing = PurePremium(),  # frozen, so safe to share
     budget: float | None = None,
     years: ArrayLike | None = None,
-) -> ParametricCover:
+) -> CalibrationResult:
     """Fit the payout levels of every unit (module docstring).
 
     Parameters
@@ -596,7 +610,9 @@ def calibrate(  # pylint: disable=too-many-arguments
     impact : climada.engine.Impact
         The loss to cover, with ``imp_mat`` (``save_mat=True``).
     payout : StepPayout
-        The payout structure of every unit.
+        The payout template of every unit: fixed breakpoints, ``tail="upper"``,
+        ``monotone=True`` and every level ``Free()``, as
+        :meth:`StepPayout.uniform` gives it.
     objective : MeanSquaredError, ExpectedUncovered or WeightedCVaR
         What the levels minimise. The mean squared error needs cvxpy.
     basis : {"annual", "event"}
@@ -615,7 +631,7 @@ def calibrate(  # pylint: disable=too-many-arguments
 
     Returns
     -------
-    ParametricCover
+    CalibrationResult
         The levels, one :class:`CoverProblem` per design problem, and the
         setup.
 
@@ -638,7 +654,7 @@ def calibrate(  # pylint: disable=too-many-arguments
     >>> cover = calibrate(  # doctest: +SKIP
     ...     index,
     ...     impact,
-    ...     payout=StepPayout(attachment=1, limit=6, n_steps=5),
+    ...     payout=StepPayout.uniform(attachment=1, exhaustion=6, n_steps=5),
     ...     objective=WeightedCVaR(alpha=0.9, beta=0.99),
     ...     basis="annual",
     ...     scope="portfolio",
@@ -659,7 +675,7 @@ def calibrate(  # pylint: disable=too-many-arguments
         loss,
         outcomes.mask,
     )
-    return ParametricCover(
+    return CalibrationResult(
         payout=payout,
         objective=objective,
         pricing=pricing,
@@ -670,6 +686,15 @@ def calibrate(  # pylint: disable=too-many-arguments
         levels=levels,
         problems=tuple(problems),
         calibration_years=outcomes.years,
+    )
+
+
+def _paid(
+    payout: StepPayout, index: NDArray[np.float64], levels: NDArray[np.float64]
+) -> NDArray[np.float64]:
+    """Return ``out[e, j] = basis(index[:, j]) @ levels[j]``, the payout per unit."""
+    return np.column_stack(
+        [payout.basis(index[:, j]) @ levels[j] for j in range(index.shape[1])]
     )
 
 

@@ -9,6 +9,14 @@ climada\_petals\.engine\.parametric\.calibrate module
     :undoc-members:
     :show-inheritance:
 
+climada\_petals\.engine\.parametric\.cover module
+-------------------------------------------------
+
+.. automodule:: climada_petals.engine.parametric.cover
+    :members:
+    :undoc-members:
+    :show-inheritance:
+
 climada\_petals\.engine\.parametric\.errors module
 --------------------------------------------------
 
@@ -53,6 +61,14 @@ climada\_petals\.engine\.parametric\.objectives module
 ------------------------------------------------------
 
 .. automodule:: climada_petals.engine.parametric.objectives
+    :members:
+    :undoc-members:
+    :show-inheritance:
+
+climada\_petals\.engine\.parametric\.parameters module
+------------------------------------------------------
+
+.. automodule:: climada_petals.engine.parametric.parameters
     :members:
     :undoc-members:
     :show-inheritance:

@@ -31,7 +31,7 @@ Variables and constraints of the linear program:
     unit's largest loss in the calibration events, and
     ``theta[j, k] <= theta[j, k + 1]``. The payout of event ``e`` is
     ``P_e = B[e] @ theta``, with ``B`` the one-hot step membership of every
-    unit side by side (:meth:`~climada_petals.engine.parametric.payout.StepPayout.basis_matrix`).
+    unit side by side (:meth:`~climada_petals.engine.parametric.payout.StepPayout.basis`).
 ``u`` (one per event with ``L_e > 0``)
     The shortfall, ``u_e >= L_e - P_e``, ``u_e >= 0``. Every objective uses
     ``u`` only through non-decreasing terms, so at the optimum
@@ -389,7 +389,7 @@ def _scaled(data: DesignData, payout: StepPayout) -> _Scaled:
     scale = data.scale
     n_units = data.loss.shape[1]
     basis = sp.csr_matrix(
-        sp.hstack([payout.basis_matrix(data.index[:, j]) for j in range(n_units)])
+        sp.hstack([payout.basis(data.index[:, j]) for j in range(n_units)])
     )
     return _Scaled(
         loss=data.total_loss / scale,

@@ -34,11 +34,12 @@ from numpy.typing import ArrayLike, NDArray
 
 from climada_petals.engine.parametric import (
     CalibrationError,
+    CalibrationResult,
     CostOfCapitalLoad,
     ExpectedUncovered,
+    Free,
     MeanSquaredError,
     MissingDependencyError,
-    ParametricCover,
     ParametricIndex,
     ParametricInputError,
     PurePremium,
@@ -49,7 +50,6 @@ from climada_petals.engine.parametric import (
 )
 from climada_petals.engine.parametric.calibrate import loss_matrix
 from climada_petals.engine.parametric.measure import OutcomeMeasure
-from climada_petals.engine.parametric.payout import BelowAttachment
 from climada_petals.engine.parametric.test._synthetic import (
     array_index,
     random_portfolio,
@@ -57,7 +57,7 @@ from climada_petals.engine.parametric.test._synthetic import (
 from climada_petals.util.config import LOGGER
 
 HAS_CVXPY = importlib.util.find_spec("cvxpy") is not None
-PAYOUT = StepPayout(attachment=20.0, limit=70.0, n_steps=4)
+PAYOUT = StepPayout.uniform(attachment=20.0, exhaustion=70.0, n_steps=4)
 RTOL = 1e-7
 
 
@@ -72,7 +72,7 @@ def _hand_example(drop_quiet_event: bool = False) -> tuple[ParametricIndex, Impa
 
 
 def _measure(
-    index: ParametricIndex, cover: ParametricCover, years: ArrayLike | None = None
+    index: ParametricIndex, cover: CalibrationResult, years: ArrayLike | None = None
 ) -> tuple[NDArray[np.bool_], OutcomeMeasure]:
     mask = index.event_mask(years)
     return mask, outcome_measure(
@@ -92,7 +92,7 @@ class TestHandWorkedDesigns(unittest.TestCase):
         cover = calibrate(
             index,
             impact,
-            payout=StepPayout(20.0, 70.0, 2),
+            payout=StepPayout.uniform(20.0, 70.0, 2),
             objective=ExpectedUncovered(),
             basis="annual",
             budget=0.5,
@@ -111,7 +111,7 @@ class TestHandWorkedDesigns(unittest.TestCase):
             cover = calibrate(
                 index,
                 impact,
-                payout=StepPayout(20.0, 70.0, 2),
+                payout=StepPayout.uniform(20.0, 70.0, 2),
                 objective=ExpectedUncovered(),
                 basis="annual",
                 budget=0.5,
@@ -120,27 +120,21 @@ class TestHandWorkedDesigns(unittest.TestCase):
         np.testing.assert_allclose(values[0], values[1], rtol=1e-9)
 
     @unittest.skipUnless(HAS_CVXPY, "the mean squared error needs cvxpy")
-    def test_mean_squared_error_in_both_attachment_modes(self) -> None:
+    def test_mean_squared_error_pays_nothing_below_the_attachment(self) -> None:
         index, impact = _hand_example()
-        expected: dict[BelowAttachment, tuple[list[float], float]] = {
-            "zero": ([4.0, 10.0], 0.0),
-            "first_bin": ([2.0, 10.0], 0.8),
-        }
-        for mode, (levels, value) in expected.items():
-            cover = calibrate(
-                index,
-                impact,
-                payout=StepPayout(20.0, 70.0, 2, below_attachment=mode),
-                objective=MeanSquaredError(),
-                basis="annual",
-                budget=5.0,
-            )
-            with self.subTest(mode=mode):
-                # An interior-point solution approaches a level at its cap only
-                # to about the square root of the solver tolerance, because the
-                # objective is flat at its optimum; the value is accurate.
-                np.testing.assert_allclose(cover.levels[0], levels, atol=1e-3)
-                self.assertAlmostEqual(cover.problems[0].objective_value, value, 6)
+        cover = calibrate(
+            index,
+            impact,
+            payout=StepPayout.uniform(20.0, 70.0, 2),
+            objective=MeanSquaredError(),
+            basis="annual",
+            budget=5.0,
+        )
+        # An interior-point solution approaches a level at its cap only to
+        # about the square root of the solver tolerance, because the objective
+        # is flat at its optimum; the value is accurate.
+        np.testing.assert_allclose(cover.levels[0], [4.0, 10.0], atol=1e-3)
+        self.assertAlmostEqual(cover.problems[0].objective_value, 0.0, 6)
 
 
 class TestLinearProgram(unittest.TestCase):
@@ -363,13 +357,13 @@ class TestCover(unittest.TestCase):
             "problems": (),
             "calibration_years": np.arange(3),
         }
-        cover = ParametricCover(**fields)
+        cover = CalibrationResult(**fields)
         self.assertFalse(cover.levels.flags.writeable)
         self.assertEqual(cover.premium, 0.0)
         with self.assertRaisesRegex(ParametricInputError, "levels must have shape"):
-            ParametricCover(**{**fields, "levels": np.zeros((2, 1))})
+            CalibrationResult(**{**fields, "levels": np.zeros((2, 1))})
         with self.assertRaisesRegex(ParametricInputError, "scope must be one of"):
-            ParametricCover(**{**fields, "scope": "cluster"})
+            CalibrationResult(**{**fields, "scope": "cluster"})
 
     def test_payouts_need_the_covers_units(self) -> None:
         other, _ = array_index(np.zeros((2, 3)), np.zeros((2, 3)), [0, 1], 10)
@@ -424,6 +418,27 @@ class TestInputs(unittest.TestCase):
             calibrate(index.values, impact, **good)
         with self.assertRaisesRegex(ParametricInputError, "StepPayout"):
             calibrate(index, impact, **{**good, "payout": (20.0, 70.0, 4)})
+
+    def test_a_payout_the_solver_cannot_take_is_refused(self) -> None:
+        index, impact = random_portfolio(0)
+        good = {"objective": ExpectedUncovered(), "basis": "annual"}
+        bad = {
+            "lower tail": StepPayout.uniform(70.0, 20.0, 4, tail="lower"),
+            "not monotone": StepPayout.uniform(20.0, 70.0, 4, monotone=False),
+            "fixed level": StepPayout.uniform(20.0, 70.0, 2, levels=[Free(), 1.0e6]),
+            "bounded level": StepPayout.uniform(
+                20.0, 70.0, 2, levels=[Free(), Free(0.0, 1.0e6)]
+            ),
+            "free breakpoint": StepPayout(
+                [20.0, Free(30.0, 50.0, grid=3)], [Free(), Free()]
+            ),
+        }
+        for name, payout in bad.items():
+            with (
+                self.subTest(name=name),
+                self.assertRaisesRegex(ParametricInputError, "Free()"),
+            ):
+                calibrate(index, impact, payout=payout, **good)
 
     def test_an_impact_that_does_not_match_the_index_is_refused(self) -> None:
         index, impact = array_index([[30.0], [60.0]], [[4.0], [10.0]], [0, 1], 10)

@@ -51,7 +51,7 @@ from climada_petals.engine.parametric.solvers import (
     solve_design,
 )
 
-PAYOUT = StepPayout(attachment=20.0, limit=70.0, n_steps=2)
+PAYOUT = StepPayout.uniform(attachment=20.0, exhaustion=70.0, n_steps=2)
 
 
 class _FakeVariable(np.ndarray):

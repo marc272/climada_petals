@@ -58,7 +58,7 @@ import pandas as pd
 from numpy.typing import ArrayLike, NDArray
 
 from ._checks import check_level
-from .calibrate import PORTFOLIO, ParametricCover, _outcomes_of_years, loss_matrix
+from .calibrate import PORTFOLIO, CalibrationResult, _outcomes_of_years, loss_matrix
 from .errors import ParametricInputError
 from .index import ParametricIndex
 from .measure import BASES, OutcomeMeasure
@@ -136,7 +136,7 @@ def subject_metrics(
 
 
 def _unit_rows(
-    cover: ParametricCover,
+    cover: CalibrationResult,
     loss: NDArray[np.float64],
     payout: NDArray[np.float64],
     measure: OutcomeMeasure,
@@ -164,7 +164,7 @@ def _unit_rows(
 def basis_risk(
     index: ParametricIndex,
     impact: Any,
-    cover: ParametricCover,
+    cover: CalibrationResult,
     *,
     beta: float,
     years: ArrayLike | None = None,
@@ -178,7 +178,7 @@ def basis_risk(
         The index with the cover's units, aligned with ``impact``.
     impact : climada.engine.Impact
         The loss, with ``imp_mat`` (``save_mat=True``).
-    cover : ParametricCover
+    cover : CalibrationResult
         The calibrated cover.
     beta : float
         Level of ``var_uncovered`` and ``cvar_uncovered``, in ``(0, 1)``.

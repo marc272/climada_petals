@@ -26,9 +26,9 @@ import unittest
 import numpy as np
 
 from climada_petals.engine.parametric import (
+    CalibrationResult,
     CostOfCapitalLoad,
     ExpectedUncovered,
-    ParametricCover,
     ParametricInputError,
     StepPayout,
     WeightedCVaR,
@@ -91,12 +91,12 @@ class TestBasisRisk(unittest.TestCase):
         self.index, self.impact = random_portfolio(5, n_events=60, n_years=90)
         self.train, self.test = split_years(self.index, train_fraction=0.7)
 
-    def _cover(self, scope: str, pricing: Pricing | None = None) -> ParametricCover:
+    def _cover(self, scope: str, pricing: Pricing | None = None) -> CalibrationResult:
         kwargs: dict[str, Pricing] = {} if pricing is None else {"pricing": pricing}
         return calibrate(
             self.index,
             self.impact,
-            payout=StepPayout(20.0, 70.0, 4),
+            payout=StepPayout.uniform(20.0, 70.0, 4),
             objective=WeightedCVaR(alpha=0.9, beta=0.9),
             basis="annual",
             scope=scope,
@@ -138,7 +138,7 @@ class TestBasisRisk(unittest.TestCase):
         cover = calibrate(
             self.index,
             self.impact,
-            payout=StepPayout(20.0, 70.0, 4),
+            payout=StepPayout.uniform(20.0, 70.0, 4),
             objective=ExpectedUncovered(),
             basis="annual",
             scope="portfolio",
