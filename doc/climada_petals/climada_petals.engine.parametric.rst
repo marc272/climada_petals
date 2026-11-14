@@ -1,6 +1,22 @@
 climada\_petals\.engine\.parametric package
 ===========================================
 
+climada\_petals\.engine\.parametric\.\_design module
+----------------------------------------------------
+
+.. automodule:: climada_petals.engine.parametric._design
+    :members:
+    :undoc-members:
+    :show-inheritance:
+
+climada\_petals\.engine\.parametric\.\_grid module
+--------------------------------------------------
+
+.. automodule:: climada_petals.engine.parametric._grid
+    :members:
+    :undoc-members:
+    :show-inheritance:
+
 climada\_petals\.engine\.parametric\.\_problem module
 -----------------------------------------------------
 

@@ -360,9 +360,7 @@ def _unique(arr: Scaled, outcome_basis: sp.csr_matrix) -> bool:
     :data:`UNIQUE_RTOL` times its largest. True when no amount is
     identified.
     """
-    weighted = (arr.event_weight > 0.0).astype(np.float64)
-    reached = np.asarray(abs(arr.basis).T @ weighted).reshape(-1) > 0.0
-    identified = (arr.lower < arr.upper) & reached
+    identified = arr.identified
     if not identified.any():
         return True
     design = sp.csc_matrix(outcome_basis)[:, identified]

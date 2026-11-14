@@ -63,14 +63,19 @@ from CLIMADA's ``Hazard``, ``TCTracks``, ``Exposures`` and ``Impact``:
   next to :class:`ExpectedUncovered` (``E[U]``) and :class:`MSE`. The first
   two are linear programs solved with scipy's HiGHS; the mean squared error
   is a quadratic program solved with scipy's ``SLSQP``, within stated
-  limits.
+  limits. A :class:`UserObjective` is any function of the outcomes' losses,
+  payouts and weights, evaluated on a grid.
 * **Calibration:** :func:`calibrate` chooses the free amounts of a template
   cover on a design sample, with ``scope="individual"`` (one design problem
   per unit) or ``scope="joint"`` (one problem on the owner's total loss, so
   the units' payouts can offset each other's shortfalls), and returns a
   :class:`CalibrationResult`, which holds the resolved cover and how it was
   found. Pricing: :class:`PurePremium` or :class:`CostOfCapitalLoad`, under
-  a premium :class:`Budget`; options in :class:`CalibrationOptions`.
+  a premium :class:`Budget`; options in :class:`CalibrationOptions`. Free
+  shape parameters (such as a free attachment), payouts that are not linear
+  in their amounts and user objectives take a stated grid, in the
+  individual scope. :func:`calibrate_frontier` calibrates at several
+  budgets: the budget frontier, a measurement with no best point.
 * **Evaluation:** :func:`evaluate` and :func:`compare` give the metrics of
   any cover, designed or given, on a sample, in or out of sample, as a
   pandas table: coverage, tail coverage, basis risk, VaR and CVaR of the
@@ -94,6 +99,7 @@ from .calibrate import (
     CoverProblem,
     DesignSample,
     calibrate,
+    calibrate_frontier,
 )
 from .constraints import Budget
 from .cover import IndexDefinition, Limit, ParametricCover
@@ -119,7 +125,7 @@ from .index import ParametricIndex
 from .index_tracks import SAFFIR_SIMPSON_KN
 from .measure import ENSEMBLE_PARENT, EventBasis, OutcomeMeasure, labels_from_names
 from .metrics import MetricOptions, setup_text
-from .objectives import MSE, ExpectedUncovered, WeightedCVaR
+from .objectives import MSE, ExpectedUncovered, UserObjective, WeightedCVaR
 from .parameters import AmountConstraints, Free
 from .payout import (
     BinaryPayout,
@@ -187,10 +193,12 @@ __all__ = [
     "UnitMappingError",
     "UnknownPayoutKindError",
     "UnresolvedParameterError",
+    "UserObjective",
     "WeightedCVaR",
     "YearRouteError",
     "YearSets",
     "calibrate",
+    "calibrate_frontier",
     "check_no_leakage",
     "compare",
     "evaluate",

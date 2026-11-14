@@ -16,20 +16,23 @@ with CLIMADA. If not, see <https://www.gnu.org/licenses/>.
 
 ---
 
-The data of one design problem, its scaled arrays and its solution.
+The data of one design problem, its scaled arrays, its solution and its record.
 
 Shared by the routes of :mod:`~climada_petals.engine.parametric.solvers`:
-the linear programs there, and the mean squared error's ``SLSQP`` route.
-:mod:`~climada_petals.engine.parametric.solvers` exports
-:class:`DesignProblem`, :class:`Solution` and :class:`SolverInfo`.
+the linear programs there, and the mean squared error's ``SLSQP`` route,
+and by the grid route. :mod:`~climada_petals.engine.parametric.solvers`
+exports :class:`DesignProblem`, :class:`Solution` and :class:`SolverInfo`,
+and :mod:`~climada_petals.engine.parametric.calibrate` exports
+:class:`CoverProblem` and :class:`DesignSample`, the records of a
+calibration result.
 """
 
 from __future__ import annotations
 
-from collections.abc import Sequence
+from collections.abc import Hashable, Sequence
 from dataclasses import dataclass, field
 from functools import cached_property
-from typing import Final
+from typing import Any, Final
 
 import numpy as np
 import scipy.sparse as sp
@@ -38,10 +41,13 @@ from numpy.typing import NDArray
 from .measure import OutcomeMeasure
 from .objectives import Objective
 from .parameters import AmountConstraints
+from .sample import OutcomeSample, SplitRecord
 
 __all__ = [
     "MIN_SCALE_LOSS",
+    "CoverProblem",
     "DesignProblem",
+    "DesignSample",
     "Scaled",
     "Solution",
     "SolverInfo",
@@ -179,13 +185,20 @@ class Solution:
         Route, solver, method, status and timing.
     unique : bool or None, default None
         Whether the identified amounts are unique: the mean squared error's
-        Hessian test. None where the route doesn't determine it.
+        Hessian test, or on the LP route the ranges' two-tolerance test.
+        None where the route doesn't determine it.
+    ranges : numpy.ndarray or None, default None
+        On the LP route with ``ranges=True``: each amount's smallest and
+        largest value over the near-optimal set, in loss units, shape
+        ``(n_amounts, 2)``, NaN for an amount that is not identified
+        (:attr:`Scaled.identified`). None otherwise.
     """
 
     amounts: NDArray[np.float64]
     objective_value: float
     info: SolverInfo
     unique: bool | None = None
+    ranges: NDArray[np.float64] | None = None
 
 
 @dataclass(frozen=True, eq=False)
@@ -213,6 +226,13 @@ class Scaled:
         return np.asarray(self.basis.T @ self.event_weight, dtype=np.float64)
 
     @property
+    def identified(self) -> NDArray[np.bool_]:
+        """Which amounts are identified: not fixed, and reached by a row with a weight."""
+        weighted = (self.event_weight > 0.0).astype(np.float64)
+        reached = np.asarray(abs(self.basis).T @ weighted).reshape(-1) > 0.0
+        return (self.lower < self.upper) & reached
+
+    @property
     def budget_unit(self) -> float:
         """Divisor of the budget row: ``E[L]``, or 1 if it is 0."""
         expected = self.expected_loss
@@ -229,3 +249,133 @@ def objective_norm(objective: Objective, arr: Scaled, measure: OutcomeMeasure) -
     """
     value = objective.evaluate(arr.loss, np.zeros_like(arr.loss), measure)
     return value if value > 0.0 else 1.0
+
+
+@dataclass(frozen=True)
+class CoverProblem:
+    """The solution of one design problem.
+
+    Attributes
+    ----------
+    problem_id : str
+        The unit id as text (individual scope), or ``"joint"``.
+    unit_id : tuple of str or int
+        The units of the problem.
+    objective_value : float
+        The objective of the resolved cover on the design sample, in loss
+        units (squared for the mean squared error), recomputed with numpy.
+    premium : float
+        The premium of the problem's payout under the design's pricing, on
+        the design sample.
+    expected_loss : float
+        ``E[L]`` of the problem's loss on the design sample.
+    budget_bound : float or None
+        The largest premium the budget allows, or None without a budget.
+    loss_weight : float
+        The weight of the outcomes with a loss: ``P(L > 0)`` on an annual
+        route, the frequency of the events with a loss on the event basis.
+    degenerate_tail : {"expected_uncovered", "single_outcome"} or None
+        The weighted CVaR's degenerate tail (module docstring), else None.
+    solver : SolverInfo
+        Route, solver, version, method, status and time.
+    unique : bool or None, default None
+        Whether the problem's identified amounts are unique: on the mean
+        squared error's route the Hessian test, on the LP route the ranges'
+        test (``ranges=True``), on a grid false with ties, else the route's
+        report at the chosen candidate (on the numpy grid, true). None where
+        the route doesn't determine it.
+    ties : int or None, default None
+        On a grid, the candidates tied with the chosen one; None without a
+        grid.
+    n_candidates : int or None, default None
+        On a grid, its candidates; None without a grid.
+    ranges : tuple or None, default None
+        On the LP route with ``ranges=True``: ``(unit_id, amount, low, high)``
+        for each identified amount, its smallest and largest value over the
+        near-optimal set, in payout units. None otherwise.
+    """
+
+    problem_id: str
+    unit_id: tuple[Hashable, ...]
+    objective_value: float
+    premium: float
+    expected_loss: float
+    budget_bound: float | None
+    loss_weight: float
+    degenerate_tail: str | None
+    solver: SolverInfo
+    unique: bool | None = None
+    ties: int | None = None
+    n_candidates: int | None = None
+    ranges: tuple[tuple[Hashable, str, float, float], ...] | None = None
+
+    @property
+    def budget_use(self) -> float | None:
+        """``premium / budget_bound``; None without a budget, NaN for a bound of 0."""
+        if self.budget_bound is None:
+            return None
+        return self.premium / self.budget_bound if self.budget_bound > 0 else np.nan
+
+
+@dataclass(frozen=True, eq=False)
+class DesignSample:
+    """What a design records of its design sample.
+
+    Enough to state the setup of a design, and for
+    :func:`~climada_petals.engine.parametric.sample.check_no_leakage` to
+    compare an evaluation sample with it.
+
+    Attributes
+    ----------
+    basis : {"event", "annual"}
+        What an outcome is.
+    route : {"frequency", "catalogue", "yearsets"}
+        How the outcomes were built.
+    n_years : int or None
+        The years the outcomes stand for; None on the event basis.
+    n_events : int
+        The sample's events.
+    n_draws : int
+        Draws per event.
+    n_outcomes : int
+        The outcomes of the measure.
+    scenario : str
+        The sample's label.
+    event_id : numpy.ndarray of int
+        The sample's events.
+    block : numpy.ndarray
+        Each event's block, the unit a split keeps together.
+    years : numpy.ndarray of int or None
+        The simulation years of a sample on catalogue years; else None.
+    split : SplitRecord or None
+        How the sample was cut from another; None for a whole sample.
+    """
+
+    basis: str
+    route: str
+    n_years: int | None
+    n_events: int
+    n_draws: int
+    n_outcomes: int
+    scenario: str
+    event_id: NDArray[np.int64]
+    block: NDArray[Any]
+    years: NDArray[np.int64] | None
+    split: SplitRecord | None
+
+    @classmethod
+    def from_sample(cls, sample: OutcomeSample) -> DesignSample:
+        """Return the record of a sample."""
+        return cls(
+            basis=sample.kind,
+            route=sample.route,
+            n_years=sample.n_years,
+            n_events=sample.n_events,
+            n_draws=sample.n_draws,
+            n_outcomes=sample.measure.n_outcomes,
+            scenario=sample.scenario,
+            event_id=sample.event_id,
+            block=sample.block,
+            years=sample.years,
+            split=sample.split,
+        )

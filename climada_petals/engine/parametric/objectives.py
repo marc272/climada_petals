@@ -36,6 +36,10 @@ uncovered loss:
 * :class:`MSE`: ``sum_o w_o (L_o - P_o)^2``, the signed residual per
   outcome, so over-payment counts like under-payment. A quadratic program
   (QP), solved with scipy's ``SLSQP``.
+* :class:`UserObjective`: any function ``function(loss, payout, weight)`` of
+  the outcome arrays ``L_o``, ``P_o`` and ``w_o`` that returns a float. It
+  is evaluated, not compiled into a program, so the calibration takes it on
+  the grid route: every free parameter on a stated grid, in numpy.
 
 On the event basis ``1 - beta`` is a frequency per year, and the CVaR is
 the mean of the worst ``1 - beta`` of frequency, the missing mass counting
@@ -64,17 +68,28 @@ case as ``degenerate_tail="expected_uncovered"`` and logs a warning.
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+import math
+from collections.abc import Callable, Mapping
+from dataclasses import dataclass, field
+from types import MappingProxyType
 from typing import Any, ClassVar
 
 import numpy as np
 from numpy.typing import ArrayLike, NDArray
 
 from ._checks import check_level, check_real
+from .errors import ParametricInputError
 from .measure import OutcomeMeasure
 from .riskmeasures import CDF_ATOL, var_cvar
 
-__all__ = ["MSE", "ExpectedUncovered", "Objective", "WeightedCVaR", "tail_degeneracy"]
+__all__ = [
+    "MSE",
+    "ExpectedUncovered",
+    "Objective",
+    "UserObjective",
+    "WeightedCVaR",
+    "tail_degeneracy",
+]
 
 
 def _outcome_uncovered(
@@ -224,8 +239,164 @@ class WeightedCVaR:
         return {"kind": self.name, "alpha": self.alpha, "beta": self.beta}
 
 
-Objective = MSE | ExpectedUncovered | WeightedCVaR
-"""The objectives :func:`~climada_petals.engine.parametric.calibrate.calibrate` accepts."""
+@dataclass(frozen=True)
+class UserObjective:
+    """A user's objective, ``function(loss, payout, weight) -> float``.
+
+    The calibration minimises it. It is evaluated on the outcome arrays, not
+    compiled into a linear or quadratic program, so
+    :func:`~climada_petals.engine.parametric.calibrate.calibrate` takes it on
+    the grid route: every free parameter of the template needs a grid (the
+    amounts too), the scope is individual, and each candidate's payout is
+    evaluated in numpy. Candidates whose premium is above the budget, or
+    whose payout is above the limit, are not chosen.
+
+    Parameters
+    ----------
+    function : callable
+        ``function(loss, payout, weight)`` with three float arrays of shape
+        ``(n_outcomes,)``: the loss ``L_o`` and the payout ``P_o`` per
+        outcome (sums over its events, as for the other objectives) and the
+        outcome weights ``w_o`` (a probability per simulated year on the
+        annual basis, the frequency on the event basis). It returns a
+        finite real number, in its own units. The arrays are copies.
+    name : str
+        The objective's name in the record and in logs. Keyword-only.
+    parameters : mapping of str to float, int, str, bool or None, optional
+        The function's own parameters, recorded in the document
+        (:meth:`to_dict`) so that a design states what it minimised; the
+        function is not called with them. Keyword-only.
+
+    Raises
+    ------
+    ParametricInputError
+        If ``function`` is not callable, ``name`` is not a non-empty string,
+        or ``parameters`` is not a mapping of names to such values.
+
+    Notes
+    -----
+    A result whose objective is a ``UserObjective`` pickles only if the
+    function does, e.g. a function defined at a module's top level.
+
+    Examples
+    --------
+    The expected squared shortfall, which leaves over-payment unpenalised:
+
+    >>> def shortfall_squared(loss, payout, weight):
+    ...     return float(weight @ np.maximum(loss - payout, 0.0) ** 2)
+    >>> objective = UserObjective(shortfall_squared, name="shortfall_squared")
+    >>> objective.to_dict()
+    {'kind': 'user', 'name': 'shortfall_squared', 'parameters': {}}
+    """
+
+    kind: ClassVar[str] = "user"
+    is_linear: ClassVar[bool] = False
+
+    function: Callable[..., Any]
+    name: str = field(kw_only=True)
+    parameters: Mapping[str, Any] | None = field(default=None, kw_only=True)
+
+    def __post_init__(self) -> None:
+        """Validate the fields; store the parameters read-only."""
+        if not callable(self.function):
+            raise ParametricInputError(
+                f"UserObjective's function must be callable, got {self.function!r}"
+            )
+        if not isinstance(self.name, str) or not self.name:
+            raise ParametricInputError(
+                f"UserObjective's name must be a non-empty string, got {self.name!r}"
+            )
+        parameters = {} if self.parameters is None else self.parameters
+        if not isinstance(parameters, Mapping) or not all(
+            isinstance(key, str) and _is_document_value(value)
+            for key, value in parameters.items()
+        ):
+            raise ParametricInputError(
+                "UserObjective's parameters must map names to finite numbers, "
+                f"strings, bools or None, got {self.parameters!r}"
+            )
+        object.__setattr__(self, "parameters", MappingProxyType(dict(parameters)))
+
+    def __hash__(self) -> int:
+        """Hash the function, the name and the parameters."""
+        return hash((self.function, self.name, frozenset(self._items())))
+
+    def __reduce__(self) -> tuple[Any, ...]:
+        """Pickle and copy through the constructor, with the parameters as a dict."""
+        return (_user_objective, (self.function, self.name, dict(self._items())))
+
+    def _items(self) -> tuple[tuple[str, Any], ...]:
+        """Return the parameters as ``(name, value)`` pairs, sorted by name."""
+        return tuple(sorted(dict(self.parameters or {}).items()))
+
+    def evaluate(
+        self, loss: ArrayLike, payout: ArrayLike, measure: OutcomeMeasure
+    ) -> float:
+        """Return the objective for per-event losses and payouts.
+
+        Parameters
+        ----------
+        loss, payout : array_like of float
+            Per-event loss and payout of the design problem, shape
+            ``(n_events,)``.
+        measure : OutcomeMeasure
+            Measure over the same events.
+
+        Returns
+        -------
+        float
+            ``function(L_o, P_o, w_o)``.
+
+        Raises
+        ------
+        ParametricInputError
+            If the function doesn't return a finite real number.
+        """
+        value = self.function(
+            measure.aggregate(loss),
+            measure.aggregate(payout),
+            np.array(measure.probability, dtype=np.float64),
+        )
+        if isinstance(value, bool | np.bool_) or not isinstance(
+            value, int | float | np.number
+        ):
+            raise ParametricInputError(
+                f"the objective {self.name!r} must return a real number, got {value!r}"
+            )
+        if not math.isfinite(float(value)):
+            raise ParametricInputError(
+                f"the objective {self.name!r} returned {value!r}, which is not finite"
+            )
+        return float(value)
+
+    def to_dict(self) -> dict[str, Any]:
+        """Return the objective's document: ``kind``, ``name`` and ``parameters``."""
+        return {
+            "kind": self.kind,
+            "name": self.name,
+            "parameters": dict(self._items()),
+        }
+
+
+def _is_document_value(value: object) -> bool:
+    """Whether a value can stand in a document: a finite number, a string, a bool or None."""
+    if value is None or isinstance(value, str | bool | np.bool_):
+        return True
+    return isinstance(value, int | float | np.number) and math.isfinite(float(value))
+
+
+def _user_objective(
+    function: Callable[..., Any], name: str, parameters: dict[str, Any]
+) -> UserObjective:
+    """Rebuild a user objective from its fields (pickling)."""
+    return UserObjective(function, name=name, parameters=parameters)
+
+
+Objective = MSE | ExpectedUncovered | WeightedCVaR | UserObjective
+"""The objectives :func:`~climada_petals.engine.parametric.calibrate.calibrate` accepts.
+
+The first three are solved exactly where the template allows it; a
+:class:`UserObjective` always takes the grid route."""
 
 
 def tail_degeneracy(

@@ -84,7 +84,7 @@ from climada_petals.util.config import LOGGER
 
 PAYOUT = StepPayout.uniform(attachment=20.0, exhaustion=70.0, n_steps=4)
 RTOL = 1e-7
-SOLVE_DESIGN = "climada_petals.engine.parametric.calibrate.solve_design"
+SOLVE_DESIGN = "climada_petals.engine.parametric.solvers.solve_design"
 
 
 def _hand_example(drop_quiet_event: bool = False) -> OutcomeSample:
@@ -855,20 +855,6 @@ class TestInputs(unittest.TestCase):
                 self.assertRaisesRegex(ParametricInputError, match),
             ):
                 calibrate(cover, self.sample, ExpectedUncovered(), scope="joint")
-
-    def test_routes_and_options_this_version_does_not_have_raise(self) -> None:
-        for objective in (ExpectedUncovered(), MSE()):
-            with (
-                self.subTest(objective=objective),
-                self.assertRaisesRegex(ParametricInputError, "ranges=True"),
-            ):
-                calibrate(
-                    self.cover,
-                    self.sample,
-                    objective,
-                    scope="joint",
-                    options=CalibrationOptions(ranges=True),
-                )
 
     def test_invalid_options_raise(self) -> None:
         bad = [
